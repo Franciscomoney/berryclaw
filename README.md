@@ -184,6 +184,16 @@ The install script installs Python deps and creates a systemd user service that 
 - `allowed_users`: empty = everyone allowed. Add Telegram user IDs to restrict.
 - `admin_users`: can use `/status`, `/forget`, `/newskill`, `/deleteskill`.
 
+## Migrating from OpenClaw / ZeroClaw
+
+If this bot previously ran OpenClaw or ZeroClaw, Telegram caches the old command menu. After switching to Berryclaw:
+
+1. Open Telegram **Settings > Data and Storage > Storage Usage > Clear Cache**
+2. Delete the chat with the bot and start a new conversation
+3. The `/` menu will now show Berryclaw's commands
+
+This is a Telegram app cache issue — the bot API side updates instantly, but the app holds onto the old list until the cache is cleared.
+
 ## Recommended Models for Pi 5
 
 | Model | Size | Speed | Quality | Command |
