@@ -2965,21 +2965,36 @@ async def handle_build_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 "recreate it. Include: layout, colors, typography, sections, "
                 "text content, spacing, and visual style. Be specific."
             )
-            desc_data = await openrouter_raw({
-                "model": VISION_MODEL,
-                "messages": [{
-                    "role": "user",
-                    "content": [
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
-                        {"type": "text", "text": desc_prompt},
-                    ],
-                }],
-            })
-            if "error" not in desc_data:
-                description = desc_data["choices"][0]["message"]["content"]
-                log.info("handle_build_photo: vision description (%d chars)", len(description))
+            # Direct call with a reliable vision model (not openrouter_raw
+            # which raises on non-200 and loses the error body)
+            async with httpx.AsyncClient(timeout=120.0) as _vc:
+                _vr = await _vc.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {OPENROUTER_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": "google/gemini-2.5-flash",
+                        "messages": [{
+                            "role": "user",
+                            "content": [
+                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
+                                {"type": "text", "text": desc_prompt},
+                            ],
+                        }],
+                    },
+                )
+                if _vr.status_code != 200:
+                    log.error("Vision API %s: %s", _vr.status_code, _vr.text[:500])
+                else:
+                    desc_data = _vr.json()
+                    description = desc_data["choices"][0]["message"]["content"]
+                    log.info("handle_build_photo: vision OK (%d chars)", len(description))
         except Exception:
             log.exception("handle_build_photo: vision description failed")
+
+        log.info("handle_build_photo: description=%s", "YES" if description else "EMPTY")
 
         # Build the message with the image path + vision description
         parts = [f"I sent you an image at {filepath}."]
