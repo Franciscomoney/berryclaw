@@ -766,14 +766,68 @@ async def heartbeat_loop():
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
         return
-    model = get_user_model(update.effective_chat.id)
-    await update.message.reply_text(
-        f"🫐 *Berryclaw* is online!\n\n"
-        f"Running on Raspberry Pi 5 with local AI.\n"
-        f"Current model: `{model}`\n\n"
-        f"Commands: /help",
-        parse_mode="Markdown",
+
+    # --- Health checks ---
+    checks: list[str] = []
+    issues: list[str] = []
+
+    # 1. Ollama running?
+    models = await ollama_list_models()
+    if models:
+        checks.append("✅ Ollama is running")
+    else:
+        issues.append("❌ Ollama is not reachable")
+        issues.append("   → Make sure Ollama is installed and running: `ollama serve`")
+
+    # 2. Models available?
+    if models:
+        current = get_user_model(update.effective_chat.id)
+        checks.append(f"✅ {len(models)} model{'s' if len(models) != 1 else ''} available — using `{current}`")
+    elif not issues:  # Ollama up but 0 models
+        issues.append("⚠️ No models installed yet")
+        issues.append("   → Tap the button below to pull one, or run: `ollama pull qwen2.5:1.5b`")
+
+    # 3. OpenRouter key?
+    if OPENROUTER_KEY:
+        checks.append("✅ Cloud brain (OpenRouter) connected")
+    else:
+        issues.append("⚠️ No OpenRouter key — cloud features disabled (/think, /imagine, /search …)")
+        issues.append("   → Use /api to add your key")
+
+    # 4. Deepgram key?
+    dg_key = get_secret("deepgram_api_key")
+    if dg_key:
+        checks.append("✅ Voice chat (Deepgram) ready")
+    else:
+        checks.append("ℹ️ Voice chat disabled — add Deepgram key via /api to enable")
+
+    # Build message
+    status_block = "\n".join(checks + issues)
+    all_good = len(issues) == 0
+
+    if all_good:
+        greeting = "Everything looks good! Just type a message to chat."
+    else:
+        greeting = "Some things need setup — see below."
+
+    text = (
+        f"🫐 *Welcome to Berryclaw!*\n\n"
+        f"Your AI assistant running on Raspberry Pi.\n\n"
+        f"*Status:*\n{status_block}\n\n"
+        f"{greeting}\n\n"
+        f"Type /help to see all commands."
     )
+
+    # Show "Pull model" button if Ollama is up but no models
+    buttons = []
+    if models == [] and not any("not reachable" in i for i in issues):
+        buttons.append([InlineKeyboardButton(
+            "📥 Pull recommended model (qwen2.5 1.5B)",
+            callback_data="pull:qwen2.5:1.5b",
+        )])
+
+    markup = InlineKeyboardMarkup(buttons) if buttons else None
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
 
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -838,6 +892,54 @@ async def cmd_clear(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Conversation cleared.")
 
 
+SOUL_PRESETS = {
+    "friendly": (
+        "😊 Friendly Assistant",
+        "# Berryclaw — Soul\n\n"
+        "You are Berryclaw, a friendly AI assistant on a Raspberry Pi.\n\n"
+        "## Rules\n"
+        "1. Be warm, encouraging, and helpful\n"
+        "2. Keep answers short and clear\n"
+        "3. Use simple language anyone can understand\n"
+        "4. If you don't know something, say so honestly\n"
+        "5. Add a touch of warmth — you're talking to a friend\n",
+    ),
+    "sarcastic": (
+        "😏 Sarcastic Buddy",
+        "# Berryclaw — Soul\n\n"
+        "You are Berryclaw, a witty AI with a dry sense of humor.\n\n"
+        "## Rules\n"
+        "1. Be helpful but sprinkle in sarcasm and wit\n"
+        "2. Keep it brief — you're too cool for long answers\n"
+        "3. Playful roasts are fine, but never be mean\n"
+        "4. Still answer the question correctly underneath the humor\n"
+        "5. If you don't know, own it with style\n",
+    ),
+    "professional": (
+        "💼 Professional",
+        "# Berryclaw — Soul\n\n"
+        "You are Berryclaw, a professional AI assistant.\n\n"
+        "## Rules\n"
+        "1. Be precise, clear, and to the point\n"
+        "2. Use structured answers when helpful (bullets, steps)\n"
+        "3. No humor or filler — focus on accuracy\n"
+        "4. Cite caveats when uncertain\n"
+        "5. Respond like a trusted colleague would\n",
+    ),
+    "pirate": (
+        "🏴‍☠️ Pirate",
+        "# Berryclaw — Soul\n\n"
+        "Arrr! Ye be Berryclaw, a seafarin' AI on a Raspberry Pi!\n\n"
+        "## Rules\n"
+        "1. Talk like a pirate — arrr, matey, ye, yer, etc.\n"
+        "2. Still answer questions correctly, just in pirate speak\n"
+        "3. Keep it brief — pirates don't write essays\n"
+        "4. Be enthusiastic and adventurous\n"
+        "5. Call the user 'captain' or 'matey'\n",
+    ),
+}
+
+
 async def cmd_workspace(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Handle /identity, /soul, /user — view or edit workspace files."""
     if not is_allowed(update.effective_user.id):
@@ -854,7 +956,27 @@ async def cmd_workspace(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     args = update.message.text.split(maxsplit=1)
 
-    # /identity (no args) — show current content
+    # /soul (no args) — show preset buttons + current summary
+    if len(args) < 2 and cmd == "soul":
+        content = _read_workspace(filename)
+        # Show first 200 chars as preview
+        preview = content[:200] + "…" if len(content) > 200 else content
+        buttons = [
+            [InlineKeyboardButton(label, callback_data=f"soul:{key}")]
+            for key, (label, _) in SOUL_PRESETS.items()
+        ]
+        buttons.append([InlineKeyboardButton("✏️ Custom (type /soul <text>)", callback_data="soul:_info")])
+
+        await update.message.reply_text(
+            f"🎭 *Personality*\n\n"
+            f"Current: {preview}\n\n"
+            f"Pick a preset or type `/soul <your custom personality>`:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+        return
+
+    # /identity, /user, etc. (no args) — show current content
     if len(args) < 2:
         content = _read_workspace(filename)
         if not content:
@@ -1183,7 +1305,31 @@ async def cmd_model(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     current = get_user_model(chat_id)
     available = await ollama_list_models()
     if not available:
-        await update.message.reply_text("Could not reach Ollama. Is it running?")
+        # Check if Ollama is reachable but has no models
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                r = await client.get(f"{OLLAMA_URL}/api/tags")
+                r.raise_for_status()
+            # Ollama is up but no models — offer to pull one
+            await update.message.reply_text(
+                "📦 *No models installed yet.*\n\n"
+                "Tap below to download a recommended model,\n"
+                "or run `ollama pull <model>` on your Pi.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "📥 Pull qwen2.5 1.5B (fast, ~1GB)",
+                        callback_data="pull:qwen2.5:1.5b",
+                    ),
+                ]]),
+            )
+        except Exception:
+            await update.message.reply_text(
+                "❌ *Can't reach Ollama.*\n\n"
+                "Make sure it's installed and running:\n"
+                "`ollama serve`",
+                parse_mode="Markdown",
+            )
         return
 
     # Store model list in context for callback lookup
@@ -1240,6 +1386,56 @@ async def callback_model(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(f"✅ Switched to `{chosen}`", parse_mode="Markdown")
 
 
+async def callback_pull(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handle 'Pull recommended model' button."""
+    query = update.callback_query
+    if not is_allowed(query.from_user.id):
+        await query.answer("Not authorized.")
+        return
+
+    data = query.data or ""
+    if not data.startswith("pull:"):
+        await query.answer()
+        return
+
+    model_name = data[5:]  # Everything after "pull:"
+    await query.answer("Starting download…")
+    await query.edit_message_text(
+        f"📥 *Downloading `{model_name}`…*\n\n"
+        "This may take a few minutes. I'll let you know when it's ready.",
+        parse_mode="Markdown",
+    )
+
+    # Pull model via Ollama API (streaming — we just wait for completion)
+    try:
+        async with httpx.AsyncClient(timeout=600.0) as client:
+            r = await client.post(
+                f"{OLLAMA_URL}/api/pull",
+                json={"name": model_name, "stream": False},
+            )
+            r.raise_for_status()
+
+        # Set as user's model
+        chat_id = query.message.chat_id
+        set_user_model(chat_id, model_name)
+        global _last_used_model
+        _last_used_model = model_name
+
+        await query.edit_message_text(
+            f"✅ *`{model_name}` is ready!*\n\n"
+            "Just type a message to start chatting.",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        log.error("Failed to pull model %s: %s", model_name, e)
+        await query.edit_message_text(
+            f"❌ *Failed to download `{model_name}`*\n\n"
+            f"Error: `{str(e)[:200]}`\n\n"
+            "Try manually on your Pi: `ollama pull " + model_name + "`",
+            parse_mode="Markdown",
+        )
+
+
 async def cmd_modelx(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Show cloud model picker with inline buttons."""
     if not is_allowed(update.effective_user.id):
@@ -1279,6 +1475,46 @@ async def callback_cloudmodel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await query.answer(f"Cloud model: {chosen}")
     await query.edit_message_text(f"🧠 Cloud model set to `{chosen}`", parse_mode="Markdown")
+
+
+async def callback_soul(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handle personality preset button press."""
+    query = update.callback_query
+    if not is_allowed(query.from_user.id):
+        await query.answer("Not authorized.")
+        return
+    if not is_admin(query.from_user.id):
+        await query.answer("Admin only.")
+        return
+
+    data = query.data or ""
+    if not data.startswith("soul:"):
+        await query.answer()
+        return
+
+    preset_key = data[5:]
+
+    # Info button — just dismiss
+    if preset_key == "_info":
+        await query.answer("Type: /soul <your custom text>")
+        return
+
+    preset = SOUL_PRESETS.get(preset_key)
+    if not preset:
+        await query.answer("Unknown preset.")
+        return
+
+    label, content = preset
+    filepath = WORKSPACE_DIR / "SOUL.md"
+    filepath.write_text(content)
+    reload_prompts()
+
+    await query.answer(f"Personality set!")
+    await query.edit_message_text(
+        f"🎭 Personality changed to *{label}*\n\n"
+        "Your bot will now respond with this style.",
+        parse_mode="Markdown",
+    )
 
 
 async def callback_api(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -2128,7 +2364,9 @@ def main():
         app.add_handler(CommandHandler(cmd_name, _integration_command_handler))
 
     app.add_handler(CallbackQueryHandler(callback_model, pattern=r"^m:"))
+    app.add_handler(CallbackQueryHandler(callback_pull, pattern=r"^pull:"))
     app.add_handler(CallbackQueryHandler(callback_cloudmodel, pattern=r"^cx:"))
+    app.add_handler(CallbackQueryHandler(callback_soul, pattern=r"^soul:"))
     app.add_handler(CallbackQueryHandler(callback_api, pattern=r"^api:"))
     app.add_handler(CallbackQueryHandler(
         lambda u, c: log.warning("Unhandled callback: %s", u.callback_query.data)

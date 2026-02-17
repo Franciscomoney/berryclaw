@@ -177,14 +177,76 @@ The memory model (`memory_model` in config) handles extraction and filtering. De
 | Web search | `/search <query>` | Cloud + Exa |
 | Read documents | `/read [question]` | Cloud (Gemini) |
 | Transcribe voice | `/voice [question]` | Cloud (Gemini) |
+| Voice chat | Send a voice note | Cloud + Deepgram |
+| Scrape websites | `/scrape <url>` | Firecrawl |
+| Run scrapers | `/apify <actor>` | Apify |
+| Google Sheets | `/sheets read\|write\|append` | Google API |
+| Google Docs | `/docs read\|append\|ask` | Google API |
+| Manage API keys | `/api` | — |
 | Edit identity | `/identity [new content]` | — |
-| Edit personality | `/soul [new content]` | — |
+| Edit personality | `/soul` (presets) or `/soul <text>` | — |
 | Edit user info | `/user [new content]` | — |
 | Edit agent rules | `/agents [new content]` | — |
 | Pi stats | `/status` | — |
 | Clear conversation | `/clear` | — |
 | Model warmup | Automatic (every 4 min) | Local |
 | Heartbeat tasks | Automatic (every 30 min) | Cloud |
+
+## User-Friendly Setup
+
+Berryclaw is designed for people who don't know a lot about tech.
+
+### Guided Start
+Run `/start` and the bot automatically checks everything:
+- Is Ollama running?
+- Are any models installed?
+- Is the OpenRouter key set?
+- Is voice chat (Deepgram) configured?
+
+If something's missing, it tells you exactly what to do — with buttons to fix it.
+
+### Auto Model Pull
+No models installed? The bot shows a **"Pull recommended model"** button. Tap it and it downloads a 1.5B model directly — no terminal needed.
+
+### Personality Presets
+Type `/soul` and pick a personality with one tap:
+- **Friendly Assistant** — warm and encouraging
+- **Sarcastic Buddy** — witty with dry humor
+- **Professional** — precise and structured
+- **Pirate** — arrr, matey!
+
+Or type `/soul <your custom personality>` for full control.
+
+### API Key Management
+Type `/api` to see which integrations are active and which need keys. Tap a key to add or remove it — all from Telegram, no file editing.
+
+## Integrations
+
+Berryclaw auto-discovers integrations from the `integrations/` folder. Drop a Python file in, add the API key via `/api`, and restart.
+
+| Integration | Commands | API Key |
+|-------------|----------|---------|
+| Deepgram | Voice notes (auto) | `deepgram_api_key` |
+| Firecrawl | `/scrape`, `/crawl` | `firecrawl_api_key` |
+| Apify | `/apify` | `apify_api_key` |
+| Google Workspace | `/sheets`, `/docs` | `google_credentials_file` |
+
+### Adding a New Integration
+
+Create `integrations/myservice.py`:
+
+```python
+NAME = "myservice"
+COMMANDS = {"mycommand": "Description of what it does"}
+REQUIRED_SECRETS = ["myservice_api_key"]
+
+async def handle(command, args, secrets, cloud_chat):
+    api_key = secrets.get("myservice_api_key", "")
+    # Your logic here
+    return "Result text"
+```
+
+Add the key via `/api` → restart the bot. Done.
 
 ## Requirements
 
@@ -201,9 +263,11 @@ The memory model (`memory_model` in config) handles extraction and filtering. De
 git clone https://github.com/Franciscomoney/berryclaw.git
 cd berryclaw
 
-# 2. Edit config
+# 2. Set up config + secrets
 cp config.json.example config.json
-# Add your Telegram bot token, OpenRouter key, etc.
+cp secrets.json.example secrets.json
+# Edit secrets.json — add your Telegram bot token + OpenRouter key
+# Edit config.json — set your admin user ID
 
 # 3. Install & run
 chmod +x install.sh
@@ -214,9 +278,11 @@ The install script installs Python deps and creates a systemd user service that 
 
 ## Config
 
+Settings go in `config.json`, API keys go in `secrets.json` (gitignored, never committed).
+
+**config.json** — non-sensitive settings:
 ```json
 {
-  "telegram_bot_token": "YOUR_BOT_TOKEN",
   "ollama_url": "http://localhost:11434",
   "default_model": "qwen25-pi",
   "max_history": 10,
@@ -225,11 +291,22 @@ The install script installs Python deps and creates a systemd user service that 
   "heartbeat_interval_seconds": 1800,
   "allowed_users": [],
   "admin_users": [YOUR_TELEGRAM_USER_ID],
-  "openrouter_api_key": "YOUR_OPENROUTER_KEY",
   "openrouter_model": "x-ai/grok-4.1-fast",
   "memory_model": "liquid/lfm-2.5-1.2b-instruct:free",
   "auto_capture": true,
   "profile_frequency": 20
+}
+```
+
+**secrets.json** — API keys (create from `secrets.json.example`):
+```json
+{
+  "telegram_bot_token": "YOUR_BOT_TOKEN",
+  "openrouter_api_key": "YOUR_OPENROUTER_KEY",
+  "deepgram_api_key": "",
+  "firecrawl_api_key": "",
+  "apify_api_key": "",
+  "google_credentials_file": ""
 }
 ```
 
@@ -238,6 +315,7 @@ The install script installs Python deps and creates a systemd user service that 
 - `memory_model`: which model handles memory extraction/recall (cheap and fast recommended).
 - `auto_capture`: set to `false` to disable automatic fact extraction after `/think`.
 - `profile_frequency`: rebuild user profile every N `/think` calls.
+- API keys can also be managed from Telegram with `/api`.
 
 ## Migrating from OpenClaw / ZeroClaw
 
