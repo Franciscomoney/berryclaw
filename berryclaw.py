@@ -2441,13 +2441,64 @@ async def cmd_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await placeholder.edit_text(f"Voice error: {e}")
 
 
+def _tmux_capture() -> str:
+    """Capture the current tmux pane content."""
+    import subprocess
+    r = subprocess.run(
+        ["tmux", "capture-pane", "-t", TMUX_SESSION, "-p"],
+        capture_output=True, text=True,
+    )
+    return r.stdout if r.returncode == 0 else ""
+
+
+def _extract_claude_response(pane_before: str, pane_now: str) -> str:
+    """Extract new Claude Code output by comparing pane snapshots.
+
+    Looks for lines starting with ● (Claude response marker) and other
+    output lines that appeared after the message was sent.
+    """
+    before_lines = set(pane_before.strip().splitlines())
+    now_lines = pane_now.strip().splitlines()
+
+    new_lines = []
+    collecting = False
+    for line in now_lines:
+        stripped = line.strip()
+        # Skip empty lines at the start
+        if not collecting and not stripped:
+            continue
+        # Start collecting from the ● marker (Claude's response)
+        if stripped.startswith("●") or stripped.startswith("·"):
+            collecting = True
+        # Also collect continuation lines (indented text after ●)
+        if collecting:
+            # Stop at the input prompt line
+            if stripped.startswith("❯") or stripped.startswith("⏵⏵"):
+                break
+            if "────────" in stripped:
+                break
+            new_lines.append(stripped)
+
+    # Clean up: remove ● and · markers, join
+    cleaned = []
+    for line in new_lines:
+        if line.startswith("●"):
+            line = line[1:].strip()
+        elif line.startswith("·"):
+            line = line[1:].strip()
+        elif line.startswith("⎿"):
+            line = "  " + line[1:].strip()
+        cleaned.append(line)
+
+    return "\n".join(cleaned).strip()
+
+
 async def _handle_build_message(update: Update, user_text: str, model: str):
-    """Inject message into Claude Code tmux session."""
+    """Inject message into Claude Code tmux session and stream output back."""
     chat_id = update.effective_chat.id
 
     # Check tmux session is alive
     if not _tmux_exists():
-        # Session died — restart it
         _start_claude_tmux(model)
         await asyncio.sleep(3)
         if not _tmux_exists():
@@ -2463,19 +2514,8 @@ async def _handle_build_message(update: Update, user_text: str, model: str):
     CHAT_ID_FILE.parent.mkdir(parents=True, exist_ok=True)
     CHAT_ID_FILE.write_text(str(chat_id))
 
-    # Write pending marker with timestamp
-    PENDING_FILE.write_text(str(int(time.time())))
-
-    # Show typing indicator in a background loop
-    async def typing_loop():
-        while PENDING_FILE.exists():
-            try:
-                await update.get_bot().send_chat_action(chat_id, "typing")
-            except Exception:
-                pass
-            await asyncio.sleep(4)
-
-    asyncio.create_task(typing_loop())
+    # Snapshot pane BEFORE sending the message
+    pane_before = _tmux_capture()
 
     # React to the message with a checkmark
     try:
@@ -2486,7 +2526,88 @@ async def _handle_build_message(update: Update, user_text: str, model: str):
     # Inject the message into Claude Code via tmux
     _tmux_send(user_text)
     _tmux_send_enter()
-    # Response comes back via the stop hook → Telegram API directly
+
+    # Stream tmux output to Telegram by polling the pane
+    bot = update.get_bot()
+    msg = None  # The Telegram message we'll keep editing
+    last_text = ""
+    idle_count = 0
+    max_wait = 300  # 5 minutes max
+
+    for tick in range(max_wait):
+        await asyncio.sleep(2)
+
+        # Check if session died
+        if not _tmux_exists():
+            if msg:
+                try:
+                    await bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=msg.message_id,
+                        text=last_text + "\n\n⚠️ _Session ended_",
+                        parse_mode="Markdown",
+                    )
+                except Exception:
+                    pass
+            break
+
+        pane_now = _tmux_capture()
+        response = _extract_claude_response(pane_before, pane_now)
+
+        if not response:
+            # Send typing while waiting for first output
+            try:
+                await bot.send_chat_action(chat_id, "typing")
+            except Exception:
+                pass
+            continue
+
+        # Check if output changed
+        if response == last_text:
+            idle_count += 1
+            # If Claude's output hasn't changed for 8 seconds (4 ticks) and
+            # the prompt input line is visible → Claude is done
+            if idle_count >= 4:
+                pane_check = _tmux_capture()
+                lines = pane_check.strip().splitlines()
+                # Check if the input prompt (❯) is back at the bottom
+                for line in reversed(lines[-5:]):
+                    s = line.strip()
+                    if s.startswith("❯") and s == "❯":
+                        # Empty prompt = Claude finished
+                        idle_count = 999
+                        break
+                    if s.startswith("⏵⏵"):
+                        idle_count = 999
+                        break
+                if idle_count >= 999:
+                    break
+            continue
+        else:
+            idle_count = 0
+
+        last_text = response
+
+        # Truncate for Telegram (4096 char limit)
+        display = response
+        if len(display) > 4000:
+            display = display[-3997:] + "..."
+
+        try:
+            if msg is None:
+                msg = await bot.send_message(
+                    chat_id=chat_id,
+                    text=display,
+                    disable_notification=True,
+                )
+            else:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg.message_id,
+                    text=display,
+                )
+        except Exception:
+            pass  # Edit failed (same content, rate limit, etc.)
 
 
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):

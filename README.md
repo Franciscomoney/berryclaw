@@ -110,7 +110,7 @@ The killer feature. Type `/build` and you get a real Claude Code agent running o
 2. You pick a model (e.g. `minimax-m2.5:cloud`) — Claude Code starts in a tmux session
 3. You type a message — it's injected into Claude Code via `tmux send-keys`
 4. Claude Code does its thing (reads files, writes code, runs commands)
-5. When it finishes, a Stop hook reads the response from the transcript and sends it back to your Telegram
+5. Berryclaw polls the tmux pane every 2 seconds and **streams the output to Telegram in real-time** — you see Claude thinking, searching files, writing code as it happens
 6. You type `/exit` — tmux session killed, back to normal chat
 
 **Setup for Build Mode:**
