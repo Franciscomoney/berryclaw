@@ -197,13 +197,24 @@ Every web project is protected with basic HTTP auth (the Pi is on a university L
 
 Projects started in Build Mode keep running after you `/exit`. Claude Code starts all servers with `setsid` so they're independent of the tmux session. To stop a server: `kill $(lsof -t -i :<port>)`.
 
+## Group Chats
+
+Add Berryclaw to any Telegram group. It only responds when:
+
+- **@mentioned** — `@yourbot what's the weather?`
+- **Replied to** — reply to one of the bot's messages
+
+All other group messages are ignored. The @mention is stripped from the text before processing so the bot doesn't echo its own name.
+
 ## Smart Memory
 
-Berryclaw remembers things automatically:
+Berryclaw remembers things automatically — **per user**, so each person gets their own memory and profile:
 
 - **Auto-capture** — after every `/think` response, key facts are extracted and saved. No manual `/remember` needed.
 - **Smart recall** — before each `/think`, relevant memories are pulled in. Not the whole memory file — just what's relevant.
 - **User profile** — every 20 `/think` calls, a profile is auto-built from your conversations. View with `/profile`.
+
+Memory files are stored in `workspace/memory/<user_id>/`.
 
 ## Personality
 
@@ -214,6 +225,27 @@ Type `/soul` to pick a preset:
 - **Pirate** — arrr, matey!
 
 Or type `/soul <your custom text>` for anything you want.
+
+## Offline Fallback
+
+If OpenRouter is down or your API key expires, `/think` automatically falls back to your local Ollama model. You'll see a "Cloud offline — falling back to local" message. The bot never breaks — it just uses the local brain instead.
+
+## First Run — Model Auto-Pull
+
+No models installed? No problem. On first startup, Berryclaw checks Ollama and:
+
+1. **Notifies admins** via Telegram with 3 recommended models as tap-to-download buttons
+2. `/start` and `/model` also show the same buttons when no models exist
+
+Recommended models for Raspberry Pi 5:
+
+| Model | Quality | Disk |
+|-------|---------|------|
+| `huihui_ai/qwen2.5-abliterate:1.5b` | Best | ~1 GB |
+| `huihui_ai/gemma3-abliterated:1b` | Good & lighter | ~770 MB |
+| `huihui_ai/qwen3-abliterated:0.6b` | Fastest, basic | ~380 MB |
+
+Tap a button — Berryclaw pulls the model and sets it as your default. Ready to chat.
 
 ## Integrations
 
