@@ -11,7 +11,7 @@
 - [x] **Group chat support** — Respond only when @mentioned or replied to. Per-group conversation history. Group-aware personality.
 - [x] **Voice output (TTS)** — Deepgram integration with `/voice` picker (12 voices, per-user selection).
 - [x] **Model auto-pull** — On first run, if no Ollama models exist, notifies admin with 3 recommended models to pick from. Also shown in /start and /model.
-- [ ] **Docker option** — `docker-compose.yml` with Berryclaw + Ollama for one-command deploy.
+- [x] **Docker option** — `docker-compose.yml` with Berryclaw + Ollama for one-command deploy. Includes Dockerfile, .dockerignore, OLLAMA_HOST env var support.
 
 ## Priority 3 — Polish
 

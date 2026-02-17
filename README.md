@@ -44,6 +44,31 @@ Already have your config? Just run it directly: `python3 berryclaw.py`
 
 Want to re-run the setup wizard? `python3 berryclaw.py --setup`
 
+### Docker
+
+If you prefer Docker, one command gets you Berryclaw + Ollama:
+
+```bash
+git clone https://github.com/Franciscomoney/berryclaw.git
+cd berryclaw
+
+# Create your config files
+cp config.json.example config.json
+cp secrets.json.example secrets.json
+
+# Edit secrets.json with your bot token and API keys
+nano secrets.json
+
+# Launch
+docker compose up -d
+```
+
+This starts both Ollama and Berryclaw. The bot auto-connects to the Ollama container — no need to install Ollama separately.
+
+Pull your first model: `docker exec berryclaw-ollama ollama pull huihui_ai/qwen2.5-abliterate:1.5b`
+
+Or just send `/start` to your bot — it'll offer model download buttons.
+
 ## What you need
 
 - **Raspberry Pi 5** (8GB recommended) or any Linux machine

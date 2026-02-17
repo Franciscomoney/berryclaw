@@ -51,7 +51,8 @@ def get_secret(key: str, default: str = "") -> str:
 
 
 BOT_TOKEN = get_secret("telegram_bot_token")
-OLLAMA_URL = CFG.get("ollama_url", "http://localhost:11434").rstrip("/")
+OLLAMA_URL = (os.environ.get("OLLAMA_HOST")
+              or CFG.get("ollama_url", "http://localhost:11434")).rstrip("/")
 DEFAULT_MODEL = CFG.get("default_model", "qwen25-pi")
 MAX_HISTORY = CFG.get("max_history", 10)
 STREAM_BATCH = CFG.get("stream_batch_tokens", 15)

@@ -1,0 +1,26 @@
+services:
+  ollama:
+    image: ollama/ollama
+    container_name: berryclaw-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+
+  berryclaw:
+    build: .
+    container_name: berryclaw-bot
+    depends_on:
+      - ollama
+    volumes:
+      - ./config.json:/app/config.json
+      - ./secrets.json:/app/secrets.json
+      - ./workspace:/app/workspace
+      - ./integrations:/app/integrations
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
