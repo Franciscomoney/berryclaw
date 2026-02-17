@@ -17,7 +17,7 @@
 
 - [x] **LICENSE file** — MIT license file.
 - [x] **CONTRIBUTING.md** — How to contribute, code style, PR process.
-- [ ] **GitHub issue templates** — Bug report, feature request templates.
+- [x] **GitHub issue templates** — Bug report, feature request templates.
 - [ ] **Better error messages** — User-friendly errors when Ollama isn't running, bad API key, model not found, etc.
 - [ ] **Rate limiting** — Per-user rate limits to prevent abuse when bot is public.
 - [ ] **Admin web dashboard** — Simple status page accessible from browser (Pi IP:port) showing stats, active users, memory usage, model info.
