@@ -524,6 +524,7 @@ def _start_claude_tmux(model: str):
         f'export ANTHROPIC_BASE_URL={OLLAMA_URL} && '
         f'export ANTHROPIC_API_KEY="" && '
         f'export PATH="$HOME/.local/bin:$PATH" && '
+        f'cd ~/projects && '
         f'claude --model {model} --dangerously-skip-permissions'
     )
     subprocess.run([
