@@ -2951,12 +2951,45 @@ async def handle_build_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await file.download_to_drive(str(filepath))
         log.info("handle_build_photo: downloaded to %s", filepath)
 
-        # Build the message to inject into Claude Code
         caption = update.message.caption or ""
+
+        # Auto-describe the image with a vision model so Claude Code gets
+        # an accurate description (Claude Code + Ollama can't reliably pass
+        # images through the tool pipeline)
+        description = ""
+        try:
+            import base64 as _b64
+            img_b64 = _b64.b64encode(filepath.read_bytes()).decode()
+            desc_prompt = (
+                "Describe this image in detail for a developer who needs to "
+                "recreate it. Include: layout, colors, typography, sections, "
+                "text content, spacing, and visual style. Be specific."
+            )
+            desc_data = await openrouter_raw({
+                "model": VISION_MODEL,
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
+                        {"type": "text", "text": desc_prompt},
+                    ],
+                }],
+            })
+            if "error" not in desc_data:
+                description = desc_data["choices"][0]["message"]["content"]
+                log.info("handle_build_photo: vision description (%d chars)", len(description))
+        except Exception:
+            log.exception("handle_build_photo: vision description failed")
+
+        # Build the message with the image path + vision description
+        parts = [f"I sent you an image at {filepath}."]
+        if description:
+            parts.append(f"\n\nHere is a detailed description of what the image shows:\n{description}")
         if caption:
-            msg = f"I sent you an image at {filepath}. {caption}"
+            parts.append(f"\n\nUser's instructions: {caption}")
         else:
-            msg = f"I sent you an image at {filepath}. Please look at it."
+            parts.append("\n\nPlease recreate what you see in this image.")
+        msg = "".join(parts)
 
         await _handle_build_message(update, msg, build_model)
     except Exception:
