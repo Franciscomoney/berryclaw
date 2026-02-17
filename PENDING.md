@@ -18,7 +18,7 @@
 - [x] **LICENSE file** — MIT license file.
 - [x] **CONTRIBUTING.md** — How to contribute, code style, PR process.
 - [x] **GitHub issue templates** — Bug report, feature request templates.
-- [ ] **Better error messages** — User-friendly errors when Ollama isn't running, bad API key, model not found, etc.
+- [x] **Better error messages** — `_friendly_error()` helper maps raw exceptions to user-friendly messages. API key guards on all cloud commands.
 - [ ] **Rate limiting** — Per-user rate limits to prevent abuse when bot is public.
 - [ ] **Admin web dashboard** — Simple status page accessible from browser (Pi IP:port) showing stats, active users, memory usage, model info.
 - [ ] **Scheduled messages / reminders** — "Remind me in 2 hours to check the oven" via local scheduling.

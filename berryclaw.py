@@ -814,6 +814,42 @@ async def openrouter_raw(payload: dict) -> dict:
         return {"error": str(e)}
 
 
+def _friendly_error(error: str | Exception, context: str = "") -> str:
+    """Turn raw errors into user-friendly Telegram messages."""
+    err = str(error).lower()
+
+    # OpenRouter / API key issues
+    if "api key not configured" in err:
+        return "🔑 No OpenRouter API key set.\n\nAdd one via /api to enable cloud features."
+    if "401" in err or "unauthorized" in err or "invalid api key" in err:
+        return "🔑 Your OpenRouter API key is invalid or expired.\n\nUpdate it via /api."
+    if "402" in err or "payment required" in err or "insufficient credits" in err:
+        return "💳 OpenRouter credits ran out.\n\nTop up at openrouter.ai/credits."
+    if "429" in err or "rate limit" in err or "too many requests" in err:
+        return "⏳ Rate limited — too many requests.\n\nWait a moment and try again."
+    if "model not found" in err or "no endpoints" in err or "does not exist" in err:
+        return f"🤖 Model not available.\n\nTry switching models with /modelx."
+
+    # Ollama issues
+    if "connect" in err and ("refused" in err or "11434" in err or "ollama" in err):
+        return "🔌 Can't reach Ollama.\n\nMake sure it's running: `ollama serve`"
+    if "timeout" in err or "timed out" in err:
+        return "⏱ Request timed out.\n\nThe model took too long. Try again or use a smaller model."
+
+    # Network issues
+    if "network" in err or "dns" in err or "unreachable" in err:
+        return "🌐 Network error — can't reach the internet.\n\nCheck your connection."
+
+    # Deepgram
+    if "deepgram" in err or "dgram" in err:
+        return "🎤 Voice service error.\n\nCheck your Deepgram API key via /api."
+
+    # Generic — keep it short, hide the traceback
+    prefix = f"{context} error" if context else "Something went wrong"
+    short = str(error)[:150]
+    return f"❌ {prefix}.\n\n`{short}`"
+
+
 # ---------------------------------------------------------------------------
 # Smart Memory — auto-capture, smart recall, profile building
 # ---------------------------------------------------------------------------
@@ -1665,7 +1701,7 @@ async def _integration_command_handler(update: Update, ctx: ContextTypes.DEFAULT
 
     except Exception as e:
         log.error("Integration %s error: %s", command, e)
-        await placeholder.edit_text(f"Error: {e}")
+        await placeholder.edit_text(_friendly_error(e, command))
 
 
 async def cmd_model(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -2409,7 +2445,7 @@ async def callback_build(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     return
                 r.raise_for_status()
         except Exception as e:
-            await query.edit_message_text(f"❌ Failed: `{str(e)[:300]}`", parse_mode="Markdown")
+            await query.edit_message_text(_friendly_error(e, "Build Mode"))
             return
 
     # Start Claude Code in tmux
@@ -2523,7 +2559,7 @@ async def cmd_think(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             fell_back = True
         except Exception as e:
             log.error("Offline fallback also failed: %s", e)
-            response = f"Both cloud and local models failed.\nCloud: {response}\nLocal: {e}"
+            response = "❌ Both cloud and local models are unavailable right now. Try again in a bit."
 
     # Save to history
     save_message(chat_id, "user", query)
@@ -2563,6 +2599,9 @@ async def cmd_imagine(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """/imagine <prompt> — Generate an image from text."""
     if not is_allowed(update.effective_user.id):
         return
+    if not OPENROUTER_KEY:
+        await update.message.reply_text(_friendly_error("API key not configured"))
+        return
     args = update.message.text.split(maxsplit=1)
     if len(args) < 2:
         await update.message.reply_text("Usage: `/imagine a cat in space`", parse_mode="Markdown")
@@ -2578,7 +2617,7 @@ async def cmd_imagine(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     })
 
     if "error" in data:
-        await placeholder.edit_text(f"Error: {data['error']}")
+        await placeholder.edit_text(_friendly_error(data['error']))
         return
 
     try:
@@ -2600,7 +2639,7 @@ async def cmd_imagine(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await placeholder.edit_text(text[:4000])
     except Exception as e:
         log.error("Imagine error: %s", e)
-        await placeholder.edit_text(f"Failed to generate image: {e}")
+        await placeholder.edit_text(_friendly_error(e, "Image generation"))
 
 
 async def _get_photo_base64(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> tuple[str, str]:
@@ -2629,6 +2668,9 @@ async def _get_photo_base64(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> t
 async def cmd_see(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """/see [question] — Analyze an image. Send with a photo or reply to one."""
     if not is_allowed(update.effective_user.id):
+        return
+    if not OPENROUTER_KEY:
+        await update.message.reply_text(_friendly_error("API key not configured"))
         return
 
     b64, mime = await _get_photo_base64(update, ctx)
@@ -2660,7 +2702,7 @@ async def cmd_see(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     })
 
     if "error" in data:
-        await placeholder.edit_text(f"Error: {data['error']}")
+        await placeholder.edit_text(_friendly_error(data['error']))
         return
 
     try:
@@ -2670,12 +2712,15 @@ async def cmd_see(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await placeholder.edit_text(response)
     except Exception as e:
         log.error("See error: %s", e)
-        await placeholder.edit_text(f"Vision error: {e}")
+        await placeholder.edit_text(_friendly_error(e, "Vision"))
 
 
 async def cmd_search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """/search <query> — Search the web and get a grounded answer."""
     if not is_allowed(update.effective_user.id):
+        return
+    if not OPENROUTER_KEY:
+        await update.message.reply_text(_friendly_error("API key not configured"))
         return
     args = update.message.text.split(maxsplit=1)
     if len(args) < 2:
@@ -2694,7 +2739,7 @@ async def cmd_search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     })
 
     if "error" in data:
-        await placeholder.edit_text(f"Error: {data['error']}")
+        await placeholder.edit_text(_friendly_error(data['error']))
         return
 
     try:
@@ -2707,7 +2752,7 @@ async def cmd_search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await placeholder.edit_text(f"🔍 Search results:\n\n{response}")
     except Exception as e:
         log.error("Search error: %s", e)
-        await placeholder.edit_text(f"Search error: {e}")
+        await placeholder.edit_text(_friendly_error(e, "Search"))
 
 
 async def _get_document_base64(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> tuple[str, str]:
@@ -2735,6 +2780,9 @@ async def _get_document_base64(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
 async def cmd_read(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """/read [question] — Analyze a PDF/document. Send with a file or reply to one."""
     if not is_allowed(update.effective_user.id):
+        return
+    if not OPENROUTER_KEY:
+        await update.message.reply_text(_friendly_error("API key not configured"))
         return
 
     b64, mime = await _get_document_base64(update, ctx)
@@ -2766,7 +2814,7 @@ async def cmd_read(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     })
 
     if "error" in data:
-        await placeholder.edit_text(f"Error: {data['error']}")
+        await placeholder.edit_text(_friendly_error(data['error']))
         return
 
     try:
@@ -2779,7 +2827,7 @@ async def cmd_read(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await placeholder.edit_text(f"📄 Document analysis:\n\n{response}")
     except Exception as e:
         log.error("Read error: %s", e)
-        await placeholder.edit_text(f"Document error: {e}")
+        await placeholder.edit_text(_friendly_error(e, "Document"))
 
 
 async def cmd_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -2860,7 +2908,7 @@ async def cmd_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     })
 
     if "error" in data:
-        await placeholder.edit_text(f"Error: {data['error']}")
+        await placeholder.edit_text(_friendly_error(data['error']))
         return
 
     try:
@@ -2873,7 +2921,7 @@ async def cmd_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await placeholder.edit_text(f"🎤 Transcription:\n\n{response}")
     except Exception as e:
         log.error("Voice error: %s", e)
-        await placeholder.edit_text(f"Voice error: {e}")
+        await placeholder.edit_text(_friendly_error(e, "Voice"))
 
 
 def _tmux_capture() -> str:
@@ -3411,7 +3459,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
     except Exception as e:
         log.error("Ollama error: %s", e)
-        await placeholder.edit_text(f"Error: {e}")
+        await placeholder.edit_text(_friendly_error(e, "Chat"))
         return
 
     if not full_response.strip():
@@ -3531,7 +3579,7 @@ async def handle_voice_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         log.error("Voice handler error: %s", e)
-        await placeholder.edit_text(f"Voice error: {e}")
+        await placeholder.edit_text(_friendly_error(e, "Voice"))
 
 
 async def _check_first_run_models(application):
