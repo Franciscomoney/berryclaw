@@ -16,6 +16,7 @@ import httpx
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
+    ApplicationHandlerStop,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
@@ -2713,6 +2714,64 @@ async def _handle_build_message(update: Update, user_text: str, model: str):
         _build_polling_cancel = None
 
 
+async def handle_build_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handle photos sent in Build Mode — download and pass path to Claude Code."""
+    if not update.message or not is_allowed(update.effective_user.id):
+        return
+    chat_id = update.effective_chat.id
+    build_model = get_build_mode(chat_id)
+    if not build_model:
+        return  # Not in build mode, let group 1 handlers deal with it
+
+    # Download the photo (largest size)
+    photo = update.message.photo[-1]
+    file = await photo.get_file()
+    uploads = Path.home() / "projects" / "uploads"
+    uploads.mkdir(parents=True, exist_ok=True)
+    filename = f"photo_{int(time.time())}_{photo.file_unique_id}.jpg"
+    filepath = uploads / filename
+    await file.download_to_drive(str(filepath))
+
+    # Build the message to inject into Claude Code
+    caption = update.message.caption or ""
+    if caption:
+        msg = f"I sent you an image at {filepath}. {caption}"
+    else:
+        msg = f"I sent you an image at {filepath}. Please look at it."
+
+    await _handle_build_message(update, msg, build_model)
+    raise ApplicationHandlerStop  # Don't let /see handler also fire
+
+
+async def handle_build_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handle documents sent in Build Mode — download and pass path to Claude Code."""
+    if not update.message or not update.message.document:
+        return
+    if not is_allowed(update.effective_user.id):
+        return
+    chat_id = update.effective_chat.id
+    build_model = get_build_mode(chat_id)
+    if not build_model:
+        return
+
+    doc = update.message.document
+    file = await doc.get_file()
+    uploads = Path.home() / "projects" / "uploads"
+    uploads.mkdir(parents=True, exist_ok=True)
+    filename = doc.file_name or f"file_{int(time.time())}"
+    filepath = uploads / filename
+    await file.download_to_drive(str(filepath))
+
+    caption = update.message.caption or ""
+    if caption:
+        msg = f"I sent you a file at {filepath} ({doc.file_name}). {caption}"
+    else:
+        msg = f"I sent you a file at {filepath} ({doc.file_name}). Please read it."
+
+    await _handle_build_message(update, msg, build_model)
+    raise ApplicationHandlerStop
+
+
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Handle regular text messages — route to local Ollama or cloud (build mode)."""
     if not update.message or not update.message.text:
@@ -2979,16 +3038,20 @@ def main():
         lambda u, c: log.warning("Unhandled callback: %s", u.callback_query.data)
     ))
 
+    # Build mode media — intercept photos/documents when in build mode
+    app.add_handler(MessageHandler(filters.PHOTO, handle_build_photo), group=0)
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_build_document), group=0)
+
     # Photos with /see caption
     app.add_handler(MessageHandler(
         filters.PHOTO & filters.CaptionRegex(r"^/see"),
         cmd_see,
-    ))
+    ), group=1)
     # Documents with /read caption
     app.add_handler(MessageHandler(
         filters.Document.ALL & filters.CaptionRegex(r"^/read"),
         cmd_read,
-    ))
+    ), group=1)
 
     # Voice messages — auto voice-in/voice-out with Deepgram
     app.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
