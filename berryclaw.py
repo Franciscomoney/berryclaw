@@ -746,6 +746,13 @@ CLOUD_CATALOG = [
     ("kimi-k2.5:cloud", "Multimodal agentic"),
 ]
 
+# Recommended local models for first-time setup (shown when Ollama has 0 models)
+RECOMMENDED_LOCAL_MODELS = [
+    ("huihui_ai/qwen2.5-abliterate:1.5b", "Best quality", "~1 GB"),
+    ("huihui_ai/gemma3-abliterated:1b", "Good & lighter", "~770 MB"),
+    ("huihui_ai/qwen3-abliterated:0.6b", "Fastest, basic", "~380 MB"),
+]
+
 
 def _is_cloud_model(name: str) -> bool:
     """Check if a model name is a cloud model."""
@@ -1081,13 +1088,14 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"Type /help to see all commands."
     )
 
-    # Show "Pull model" button if Ollama is up but no models
+    # Show recommended model buttons if Ollama is up but no models
     buttons = []
     if models == [] and not any("not reachable" in i for i in issues):
-        buttons.append([InlineKeyboardButton(
-            "📥 Pull recommended model (qwen2.5 1.5B)",
-            callback_data="pull:qwen2.5:1.5b",
-        )])
+        for name, desc, size in RECOMMENDED_LOCAL_MODELS:
+            buttons.append([InlineKeyboardButton(
+                f"📥 {name.split('/')[-1]} — {desc} ({size})",
+                callback_data=f"pull:{name}",
+            )])
 
     markup = InlineKeyboardMarkup(buttons) if buttons else None
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
@@ -1695,18 +1703,19 @@ async def cmd_model(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             async with httpx.AsyncClient(timeout=5.0) as client:
                 r = await client.get(f"{OLLAMA_URL}/api/tags")
                 r.raise_for_status()
-            # Ollama is up but no models — offer to pull one
+            # Ollama is up but no models — offer recommended ones
+            buttons = []
+            for name, desc, size in RECOMMENDED_LOCAL_MODELS:
+                buttons.append([InlineKeyboardButton(
+                    f"📥 {name.split('/')[-1]} — {desc} ({size})",
+                    callback_data=f"pull:{name}",
+                )])
             await update.message.reply_text(
                 "📦 *No models installed yet.*\n\n"
-                "Tap below to download a recommended model,\n"
-                "or run `ollama pull <model>` on your Pi.",
+                "Pick a model to download:\n"
+                "_(recommended: qwen2.5-abliterate 1.5B)_",
                 parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton(
-                        "📥 Pull qwen2.5 1.5B (fast, ~1GB)",
-                        callback_data="pull:qwen2.5:1.5b",
-                    ),
-                ]]),
+                reply_markup=InlineKeyboardMarkup(buttons),
             )
         except Exception:
             await update.message.reply_text(
@@ -1832,6 +1841,14 @@ async def callback_pull(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         set_user_model(chat_id, model_name)
         global _last_used_model
         _last_used_model = model_name
+
+        # Update default_model in config if this is the first model
+        if CFG.get("default_model", "") in ("", "qwen25-pi"):
+            CFG["default_model"] = model_name
+            with open(CONFIG_PATH, "w") as f:
+                json.dump(CFG, f, indent=2)
+                f.write("\n")
+            log.info("Updated default_model to %s", model_name)
 
         await query.edit_message_text(
             f"✅ *`{model_name}` is ready!*\n\n"
@@ -3516,6 +3533,47 @@ async def handle_voice_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await placeholder.edit_text(f"Voice error: {e}")
 
 
+async def _check_first_run_models(application):
+    """On startup, if Ollama has 0 local models, notify admins with pull buttons."""
+    await asyncio.sleep(3)  # Let bot fully start
+    try:
+        models = await ollama_list_models()
+        local_models = [m for m in models if not _is_cloud_model(m)]
+        if local_models:
+            return  # Already has models — nothing to do
+
+        # Check if Ollama is even reachable
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(f"{OLLAMA_URL}/api/tags")
+            r.raise_for_status()
+
+        # Ollama is up but no local models — send admins a message
+        buttons = []
+        for name, desc, size in RECOMMENDED_LOCAL_MODELS:
+            buttons.append([InlineKeyboardButton(
+                f"📥 {name.split('/')[-1]} — {desc} ({size})",
+                callback_data=f"pull:{name}",
+            )])
+
+        for admin_id in ADMIN_USERS:
+            try:
+                await application.bot.send_message(
+                    chat_id=admin_id,
+                    text=(
+                        "📦 *No local models found on Ollama.*\n\n"
+                        "Pick one to download — I'll set it up for you:"
+                    ),
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
+            except Exception as e:
+                log.warning("Could not notify admin %s about models: %s", admin_id, e)
+
+        log.info("No local models found — notified %d admin(s)", len(ADMIN_USERS))
+    except Exception as e:
+        log.warning("First-run model check failed (Ollama down?): %s", e)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -3645,6 +3703,9 @@ def main():
         asyncio.create_task(warmup_loop())
         asyncio.create_task(heartbeat_loop())
 
+        # Auto-pull check: if Ollama has 0 models, notify admins
+        asyncio.create_task(_check_first_run_models(application))
+
     app.post_init = post_init
 
     log.info("Bot is running. Press Ctrl+C to stop.")
@@ -3751,10 +3812,16 @@ def setup_wizard():
     # Default model
     default = config.get("default_model", "qwen25-pi")
     print(f"\nDefault local model: {default}")
-    print("Recommended: huihui_ai/qwen2.5-abliterate:1.5b (fast, good quality)")
-    new_model = input("Change? (Enter to keep): ").strip()
+    print("Recommended models for Raspberry Pi 5:")
+    for i, (name, desc, size) in enumerate(RECOMMENDED_LOCAL_MODELS, 1):
+        marker = " ← recommended" if i == 1 else ""
+        print(f"  {i}. {name} — {desc} ({size}){marker}")
+    new_model = input("Pick a number, type a model name, or Enter to keep current: ").strip()
     if new_model:
-        default = new_model
+        if new_model.isdigit() and 1 <= int(new_model) <= len(RECOMMENDED_LOCAL_MODELS):
+            default = RECOMMENDED_LOCAL_MODELS[int(new_model) - 1][0]
+        else:
+            default = new_model
     config["default_model"] = default
 
     # Fill in defaults for other settings
