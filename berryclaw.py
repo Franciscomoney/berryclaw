@@ -482,6 +482,7 @@ def exit_build_mode(chat_id: int):
 TMUX_SESSION = "claude-build"
 PENDING_FILE = Path.home() / ".claude" / "telegram_pending"
 CHAT_ID_FILE = Path.home() / ".claude" / "telegram_chat_id"
+_build_polling_cancel: asyncio.Event | None = None  # Signal to stop current polling loop
 
 
 def _tmux_exists() -> bool:
@@ -1973,6 +1974,33 @@ async def cmd_exit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_stop(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Interrupt Claude Code — stop current task without exiting Build Mode."""
+    global _build_polling_cancel
+    if not is_allowed(update.effective_user.id):
+        return
+
+    chat_id = update.effective_chat.id
+    build_model = get_build_mode(chat_id)
+
+    if not build_model:
+        await update.message.reply_text("You're not in Build Mode.")
+        return
+
+    # Cancel the polling loop
+    if _build_polling_cancel is not None and not _build_polling_cancel.is_set():
+        _build_polling_cancel.set()
+
+    # Send Escape to interrupt Claude Code
+    if _tmux_exists():
+        _tmux_send_escape()
+
+    await update.message.reply_text(
+        "⚡ *Interrupted*\n\nClaude Code stopped. Send a new message or /exit.",
+        parse_mode="Markdown",
+    )
+
+
 async def callback_build(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Handle /build button — start/exit Claude Code tmux session."""
     query = update.callback_query
@@ -2495,7 +2523,14 @@ def _extract_claude_response(pane_before: str, pane_now: str) -> str:
 
 async def _handle_build_message(update: Update, user_text: str, model: str):
     """Inject message into Claude Code tmux session and stream output back."""
+    global _build_polling_cancel
     chat_id = update.effective_chat.id
+
+    # If a previous polling loop is running, cancel it and interrupt Claude
+    if _build_polling_cancel is not None and not _build_polling_cancel.is_set():
+        _build_polling_cancel.set()
+        _tmux_send_escape()
+        await asyncio.sleep(1.5)
 
     # Check tmux session is alive
     if not _tmux_exists():
@@ -2513,6 +2548,10 @@ async def _handle_build_message(update: Update, user_text: str, model: str):
     # Write chat_id so the stop hook knows where to respond
     CHAT_ID_FILE.parent.mkdir(parents=True, exist_ok=True)
     CHAT_ID_FILE.write_text(str(chat_id))
+
+    # Create a cancel event for this polling loop
+    cancel = asyncio.Event()
+    _build_polling_cancel = cancel
 
     # Snapshot pane BEFORE sending the message
     pane_before = _tmux_capture()
@@ -2536,6 +2575,20 @@ async def _handle_build_message(update: Update, user_text: str, model: str):
 
     for tick in range(max_wait):
         await asyncio.sleep(2)
+
+        # Check if cancelled by a newer message
+        if cancel.is_set():
+            if msg and last_text:
+                try:
+                    await bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=msg.message_id,
+                        text=last_text + "\n\n⚡ _Interrupted_",
+                        parse_mode="Markdown",
+                    )
+                except Exception:
+                    pass
+            return
 
         # Check if session died
         if not _tmux_exists():
@@ -2574,7 +2627,6 @@ async def _handle_build_message(update: Update, user_text: str, model: str):
                 for line in reversed(lines[-5:]):
                     s = line.strip()
                     if s.startswith("❯") and s == "❯":
-                        # Empty prompt = Claude finished
                         idle_count = 999
                         break
                     if s.startswith("⏵⏵"):
@@ -2608,6 +2660,10 @@ async def _handle_build_message(update: Update, user_text: str, model: str):
                 )
         except Exception:
             pass  # Edit failed (same content, rate limit, etc.)
+
+    # Clear cancel ref if we're still the active loop
+    if _build_polling_cancel is cancel:
+        _build_polling_cancel = None
 
 
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -2833,6 +2889,7 @@ def main():
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("build", cmd_build))
     app.add_handler(CommandHandler("exit", cmd_exit))
+    app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("api", cmd_api))
     app.add_handler(CommandHandler("think", cmd_think))
     app.add_handler(CommandHandler("identity", cmd_workspace))
@@ -2903,6 +2960,7 @@ def main():
             BotCommand("think", "Ask a powerful cloud model"),
             BotCommand("build", "Start Claude Code session"),
             BotCommand("exit", "Exit Claude Code"),
+            BotCommand("stop", "Interrupt Claude Code"),
             BotCommand("imagine", "Generate an image"),
             BotCommand("see", "Analyze a photo"),
             BotCommand("search", "Search the web"),
