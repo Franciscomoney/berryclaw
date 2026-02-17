@@ -2,7 +2,7 @@
 
 ## Priority 1 — Must Have
 
-- [ ] **Interactive setup** — `python3 berryclaw.py --setup` wizard that asks for bot token, OpenRouter key, preferred model, admin user ID. Writes config.json. Alternatively, `/setup` command in Telegram for first admin.
+- [x] **Interactive setup** — `python3 berryclaw.py --setup` wizard + auto-admin on first `/start`. Install script auto-runs setup if no config exists.
 - [ ] **Multi-user memory** — MEMORY.md and PROFILE.md are currently global. Need per-user memory and profile (SQLite or separate files per user_id). Conversation history is already per chat_id.
 - [x] **Offline fallback** — `/think` falls back to local Ollama when OpenRouter is down. Shows "Cloud offline — falling back to local" message.
 

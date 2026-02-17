@@ -920,6 +920,21 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
         return
 
+    # Auto-admin: if no admins configured, first /start user becomes admin
+    if not ADMIN_USERS:
+        user_id = update.effective_user.id
+        ADMIN_USERS.append(user_id)
+        CFG["admin_users"] = ADMIN_USERS
+        with open(CONFIG_PATH, "w") as f:
+            json.dump(CFG, f, indent=2)
+            f.write("\n")
+        log.info("Auto-admin: user %s is now admin", user_id)
+        await update.message.reply_text(
+            f"👑 You're the first user — you are now admin!\n"
+            f"Your user ID: `{user_id}`",
+            parse_mode="Markdown",
+        )
+
     # --- Health checks ---
     checks: list[str] = []
     issues: list[str] = []
@@ -3532,5 +3547,135 @@ def main():
     )
 
 
+def setup_wizard():
+    """Interactive setup wizard — creates config.json and secrets.json."""
+    import sys
+
+    print("\n🫐 Berryclaw Setup\n")
+    print("This wizard will create your config.json and secrets.json files.\n")
+
+    # --- secrets.json ---
+    secrets = {}
+    if SECRETS_PATH.exists():
+        with open(SECRETS_PATH) as f:
+            secrets = json.load(f)
+        print(f"Found existing secrets.json — will update it.\n")
+
+    # Telegram bot token
+    current_token = secrets.get("telegram_bot_token", "")
+    if current_token and current_token != "YOUR_BOT_TOKEN_FROM_BOTFATHER":
+        print(f"Telegram bot token: {current_token[:8]}...{current_token[-4:]}")
+        change = input("Keep this token? [Y/n] ").strip().lower()
+        if change == "n":
+            current_token = ""
+    if not current_token or current_token == "YOUR_BOT_TOKEN_FROM_BOTFATHER":
+        print("Get a bot token from @BotFather on Telegram: https://t.me/BotFather")
+        current_token = input("Paste your bot token: ").strip()
+        if not current_token:
+            print("❌ Bot token is required. Exiting.")
+            sys.exit(1)
+    secrets["telegram_bot_token"] = current_token
+
+    # OpenRouter API key
+    current_or = secrets.get("openrouter_api_key", "")
+    if current_or and current_or != "YOUR_OPENROUTER_API_KEY":
+        print(f"\nOpenRouter API key: {current_or[:8]}...")
+        change = input("Keep this key? [Y/n] ").strip().lower()
+        if change == "n":
+            current_or = ""
+    if not current_or or current_or == "YOUR_OPENROUTER_API_KEY":
+        print("\nOpenRouter powers /think, /imagine, /search, and more.")
+        print("Get a free key at: https://openrouter.ai/keys")
+        current_or = input("Paste your OpenRouter key (or Enter to skip): ").strip()
+    secrets["openrouter_api_key"] = current_or
+
+    # Ollama API key (for cloud models / Build Mode)
+    current_ollama = secrets.get("ollama_api_key", "")
+    if not current_ollama:
+        print("\nOllama cloud key enables Build Mode (Claude Code with cloud models).")
+        print("Sign in at: https://ollama.com then run 'ollama signin'")
+        current_ollama = input("Paste your Ollama API key (or Enter to skip): ").strip()
+    secrets["ollama_api_key"] = current_ollama
+
+    # Ensure other keys exist
+    for key in ["deepgram_api_key", "firecrawl_api_key", "apify_api_key", "google_credentials_file"]:
+        if key not in secrets:
+            secrets[key] = ""
+
+    with open(SECRETS_PATH, "w") as f:
+        json.dump(secrets, f, indent=2)
+        f.write("\n")
+    print(f"\n✅ Saved secrets.json")
+
+    # --- config.json ---
+    config = {}
+    if CONFIG_PATH.exists():
+        with open(CONFIG_PATH) as f:
+            config = json.load(f)
+        print(f"Found existing config.json — will update it.\n")
+
+    # Admin user ID
+    current_admins = config.get("admin_users", [])
+    if current_admins:
+        print(f"Admin users: {current_admins}")
+        change = input("Keep these admins? [Y/n] ").strip().lower()
+        if change == "n":
+            current_admins = []
+    if not current_admins:
+        print("\nYour Telegram user ID makes you the bot admin.")
+        print("To find it: message @userinfobot on Telegram")
+        admin_input = input("Your Telegram user ID (or Enter to auto-detect on first /start): ").strip()
+        if admin_input:
+            try:
+                current_admins = [int(admin_input)]
+            except ValueError:
+                print("⚠️ Invalid ID — will auto-detect on first /start")
+                current_admins = []
+    config["admin_users"] = current_admins
+
+    # Ollama URL
+    ollama_url = config.get("ollama_url", "http://localhost:11434")
+    print(f"\nOllama URL: {ollama_url}")
+    new_url = input("Change? (Enter to keep): ").strip()
+    if new_url:
+        ollama_url = new_url
+    config["ollama_url"] = ollama_url
+
+    # Default model
+    default = config.get("default_model", "qwen25-pi")
+    print(f"\nDefault local model: {default}")
+    print("Recommended: huihui_ai/qwen2.5-abliterate:1.5b (fast, good quality)")
+    new_model = input("Change? (Enter to keep): ").strip()
+    if new_model:
+        default = new_model
+    config["default_model"] = default
+
+    # Fill in defaults for other settings
+    config.setdefault("max_history", 10)
+    config.setdefault("stream_batch_tokens", 15)
+    config.setdefault("warmup_interval_seconds", 240)
+    config.setdefault("heartbeat_interval_seconds", 1800)
+    config.setdefault("allowed_users", [])
+    config.setdefault("openrouter_model", "x-ai/grok-4.1-fast")
+    config.setdefault("memory_model", "liquid/lfm-2.5-1.2b-instruct:free")
+    config.setdefault("auto_capture", True)
+    config.setdefault("profile_frequency", 20)
+
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(config, f, indent=2)
+        f.write("\n")
+    print(f"✅ Saved config.json")
+
+    print(f"\n🫐 Setup complete! Run the bot:\n")
+    print(f"   python3 berryclaw.py\n")
+    print(f"Then send /start to your bot on Telegram.")
+    if not current_admins:
+        print(f"The first person to /start will become admin.\n")
+
+
 if __name__ == "__main__":
-    main()
+    import sys
+    if "--setup" in sys.argv:
+        setup_wizard()
+    else:
+        main()

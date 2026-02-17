@@ -33,20 +33,16 @@ You (Telegram)
 git clone https://github.com/Franciscomoney/berryclaw.git
 cd berryclaw
 
-# Set up config + secrets
-cp config.json.example config.json
-cp secrets.json.example secrets.json
-# Edit secrets.json — add your Telegram bot token + OpenRouter key
-# Edit config.json — set your admin user ID
-
-# Install & run
+# Install & run — interactive setup walks you through everything
 chmod +x install.sh
 ./install.sh
 ```
 
-The install script installs Python deps and creates a systemd service that auto-starts on boot.
+The install script installs Python deps, runs the **interactive setup wizard** (asks for your bot token, API keys, admin user ID), and creates a systemd service that auto-starts on boot.
 
-Or just run it directly: `python3 berryclaw.py`
+Already have your config? Just run it directly: `python3 berryclaw.py`
+
+Want to re-run the setup wizard? `python3 berryclaw.py --setup`
 
 ## What you need
 
