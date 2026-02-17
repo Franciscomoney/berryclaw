@@ -2380,6 +2380,26 @@ async def cmd_think(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     response = await openrouter_chat(messages, model=cloud_model)
 
+    # Offline fallback — if cloud failed, route through local Ollama
+    fell_back = False
+    if response.startswith("Cloud model error:") or response.startswith("OpenRouter API key not configured"):
+        local_model = get_user_model(chat_id)
+        try:
+            await placeholder.edit_text(
+                f"☁️ Cloud offline — falling back to local `{local_model}`...",
+                parse_mode="Markdown",
+            )
+            local_messages = [{"role": "system", "content": SYSTEM_PROMPT_LOCAL}]
+            local_messages.extend(history)
+            local_messages.append({"role": "user", "content": query})
+            response = ""
+            async for token in ollama_stream(local_model, local_messages):
+                response += token
+            fell_back = True
+        except Exception as e:
+            log.error("Offline fallback also failed: %s", e)
+            response = f"Both cloud and local models failed.\nCloud: {response}\nLocal: {e}"
+
     # Save to history
     save_message(chat_id, "user", query)
     save_message(chat_id, "assistant", response)
@@ -2389,10 +2409,11 @@ async def cmd_think(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if len(response) > 4000:
         response = response[:4000] + "\n\n... (truncated)"
 
+    header = "📡 *Local fallback:*" if fell_back else "🧠 *Cloud response:*"
     try:
-        await placeholder.edit_text(f"🧠 *Cloud response:*\n\n{response}", parse_mode="Markdown")
+        await placeholder.edit_text(f"{header}\n\n{response}", parse_mode="Markdown")
     except Exception:
-        await placeholder.edit_text(f"🧠 Cloud response:\n\n{response}")
+        await placeholder.edit_text(f"{header}\n\n{response}")
 
     # Background: auto-capture facts + profile update
     if AUTO_CAPTURE:
