@@ -2782,7 +2782,10 @@ async def _handle_build_message(update: Update, user_text: str, model: str):
         pass
 
     # Inject the message into Claude Code via tmux
+    # Small delay after long pastes so Claude Code's input component
+    # finishes processing before Enter arrives
     _tmux_send(user_text)
+    await asyncio.sleep(0.5)
     _tmux_send_enter()
 
     # Stream tmux output to Telegram by polling the pane
