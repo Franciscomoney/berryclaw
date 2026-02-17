@@ -2155,6 +2155,32 @@ async def callback_build(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def callback_build_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handle menu option selection from Build Mode interactive menus."""
+    global _build_menu_future
+    query = update.callback_query
+
+    data = query.data or ""
+    if not data.startswith("bmenu:"):
+        return
+
+    choice = int(data.split(":")[1])
+    await query.answer(f"Option {choice + 1} selected")
+
+    # Show what was selected
+    try:
+        buttons = query.message.reply_markup.inline_keyboard
+        if choice < len(buttons):
+            selected_text = buttons[choice][0].text
+            await query.edit_message_text(f"✅ {selected_text}")
+    except Exception:
+        pass
+
+    # Resolve the future so the polling loop can continue
+    if _build_menu_future and not _build_menu_future.done():
+        _build_menu_future.set_result(choice)
+
+
 async def cmd_think(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Route query to a powerful cloud model via OpenRouter."""
     if not is_allowed(update.effective_user.id):
@@ -2587,9 +2613,53 @@ def _detect_interactive_menu(pane: str) -> bool:
     return False
 
 
+def _parse_interactive_menu(pane: str) -> tuple[str, list[str]]:
+    """Extract question text and option labels from a Claude Code menu."""
+    lines = pane.strip().splitlines()
+    bottom = lines[-15:]
+
+    options: list[str] = []
+    selected_idx: int | None = None
+
+    # Find the selected option (❯ marker)
+    for i, line in enumerate(bottom):
+        s = line.strip()
+        if s.startswith("❯ ") and len(s) > 3:
+            selected_idx = i
+            options.append(s[2:])
+            break
+
+    if selected_idx is None:
+        return "", []
+
+    # Collect remaining options after the selected one
+    for line in bottom[selected_idx + 1:]:
+        s = line.strip()
+        if not s:
+            continue
+        # Stop at markers that aren't options
+        if s.startswith(("●", "·", "⎿", "⏵", "❯", "────")):
+            break
+        options.append(s)
+
+    # Look for question text above the options
+    question = ""
+    for i in range(selected_idx - 1, max(selected_idx - 6, -1), -1):
+        s = bottom[i].strip()
+        if s and not s.startswith(("●", "·", "⎿", "⏵", "❯", "────")):
+            question = s
+            break
+
+    return question, options
+
+
+# Future for coordinating menu selection between polling loop and callback
+_build_menu_future: asyncio.Future | None = None
+
+
 async def _handle_build_message(update: Update, user_text: str, model: str):
     """Inject message into Claude Code tmux session and stream output back."""
-    global _build_polling_cancel
+    global _build_polling_cancel, _build_menu_future
     chat_id = update.effective_chat.id
 
     # If a previous polling loop is running, cancel it and interrupt Claude
@@ -2644,6 +2714,9 @@ async def _handle_build_message(update: Update, user_text: str, model: str):
 
         # Check if cancelled by a newer message
         if cancel.is_set():
+            # Cancel any pending menu selection
+            if _build_menu_future and not _build_menu_future.done():
+                _build_menu_future.cancel()
             if msg and last_text:
                 try:
                     await bot.edit_message_text(
@@ -2698,10 +2771,45 @@ async def _handle_build_message(update: Update, user_text: str, model: str):
                     if s.startswith("⏵⏵"):
                         idle_count = 999
                         break
-                # Auto-dismiss interactive menus (AskUserQuestion)
-                # These show ❯ with option text — auto-press Enter to pick first option
+                # Interactive menu detected — show options as Telegram buttons
                 if idle_count < 999 and _detect_interactive_menu(pane_check):
-                    _tmux_send_enter()
+                    question, options = _parse_interactive_menu(pane_check)
+                    if len(options) > 1:
+                        # Present choices to the user
+                        loop = asyncio.get_running_loop()
+                        menu_future = loop.create_future()
+                        _build_menu_future = menu_future
+
+                        buttons = []
+                        for i, opt in enumerate(options):
+                            label = (opt[:57] + "…") if len(opt) > 58 else opt
+                            buttons.append([InlineKeyboardButton(
+                                label, callback_data=f"bmenu:{i}",
+                            )])
+
+                        q_text = f"🔀 *Claude is asking:*\n{question}" if question else "🔀 *Claude needs your input:*"
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=q_text,
+                            parse_mode="Markdown",
+                            reply_markup=InlineKeyboardMarkup(buttons),
+                        )
+
+                        # Wait for user to tap a button (60s timeout)
+                        try:
+                            choice_idx = await asyncio.wait_for(menu_future, timeout=60)
+                            # Navigate: Down arrow choice_idx times, then Enter
+                            for _ in range(choice_idx):
+                                _tmux_send("Down", literal=False)
+                                await asyncio.sleep(0.15)
+                            _tmux_send_enter()
+                        except (asyncio.TimeoutError, asyncio.CancelledError):
+                            _tmux_send_enter()  # Timeout → pick first option
+                        finally:
+                            _build_menu_future = None
+                    else:
+                        # Single option or can't parse — just Enter
+                        _tmux_send_enter()
                     idle_count = 0
                 if idle_count >= 999:
                     break
@@ -3056,6 +3164,7 @@ def main():
     app.add_handler(CallbackQueryHandler(callback_cloudmodel, pattern=r"^cx:"))
     app.add_handler(CallbackQueryHandler(callback_soul, pattern=r"^soul:"))
     app.add_handler(CallbackQueryHandler(callback_build, pattern=r"^build:"))
+    app.add_handler(CallbackQueryHandler(callback_build_menu, pattern=r"^bmenu:"))
     app.add_handler(CallbackQueryHandler(callback_api, pattern=r"^api:"))
     app.add_handler(CallbackQueryHandler(
         lambda u, c: log.warning("Unhandled callback: %s", u.callback_query.data)
