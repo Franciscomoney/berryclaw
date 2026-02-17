@@ -484,6 +484,7 @@ TMUX_SESSION = "claude-build"
 PENDING_FILE = Path.home() / ".claude" / "telegram_pending"
 CHAT_ID_FILE = Path.home() / ".claude" / "telegram_chat_id"
 _build_polling_cancel: asyncio.Event | None = None  # Signal to stop current polling loop
+_api_awaiting_key: dict[int, str] = {}  # {chat_id: key_name} — waiting for user to paste API key
 
 
 def _tmux_exists() -> bool:
@@ -1792,11 +1793,12 @@ async def callback_api(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("api:set:"):
         key_name = data.split(":", 2)[2]
+        chat_id = query.message.chat_id
+        _api_awaiting_key[chat_id] = key_name
         await query.answer()
         await query.edit_message_text(
-            f"To set `{key_name}`, send:\n\n"
-            f"`/api set {key_name} YOUR_KEY_HERE`\n\n"
-            f"Your message will be auto-deleted for security.",
+            f"🔑 Paste your `{key_name}` below.\n\n"
+            f"Just paste the key and hit send — it will be saved and your message auto-deleted.",
             parse_mode="Markdown",
         )
         return
@@ -3055,6 +3057,32 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     global _last_used_model
     chat_id = update.effective_chat.id
     user_text = update.message.text
+
+    # Check if we're waiting for an API key paste
+    if chat_id in _api_awaiting_key and is_admin(update.effective_user.id):
+        key_name = _api_awaiting_key.pop(chat_id)
+        value = user_text.strip()
+        # Save the key
+        SECRETS[key_name] = value
+        with open(SECRETS_PATH, "w") as f:
+            json.dump(SECRETS, f, indent=2)
+            f.write("\n")
+        # Reload integrations
+        global INTEGRATIONS
+        INTEGRATIONS = load_integrations()
+        # Delete the message (contains the API key)
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+        masked = value[:8] + "..." if len(value) > 8 else "***"
+        active = list(INTEGRATIONS.keys())
+        await update.effective_chat.send_message(
+            f"✅ `{key_name}` saved (`{masked}`)\n\n"
+            f"Active integrations: {', '.join('/' + c for c in active) if active else 'none'}",
+            parse_mode="Markdown",
+        )
+        return
 
     # Check if user is in Build Mode → route to actual Claude Code
     build_model = get_build_mode(chat_id)
