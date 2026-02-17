@@ -62,20 +62,50 @@ Telegram ←→ Berryclaw (Python) ←→ Ollama (local, fast, casual)
                                  ↘ OpenRouter (cloud, powerful, /think + /skills)
 ```
 
-**Single Python file** (~800 lines) + markdown workspace files. No framework bloat.
+**Single Python file** + markdown workspace files. No framework bloat.
 
 ### Local Brain (Ollama)
 - Handles regular messages
-- System prompt: ~50 tokens ("You are Berryclaw. Be helpful and brief.")
+- System prompt: ~500 tokens — compressed personality, user context, rules
 - Streaming responses with batched Telegram message edits
 - Per-user model selection
 - ~5-15 tokens/second on Pi 5
 
 ### Cloud Brain (OpenRouter)
-- Handles `/think` queries and all skills
-- Full system prompt: IDENTITY + SOUL + USER + AGENTS + MEMORY
+- Handles `/think` queries, skills, and power skills
+- Full system prompt: IDENTITY + SOUL + USER + AGENTS + PROFILE + MEMORY
+- Power skills: `/imagine`, `/see`, `/search`, `/read`, `/voice`
 - Supports any model: Grok, Claude, Gemini, DeepSeek, etc.
 - Per-user model selection
+
+### Why ~500 Tokens for Local? (OpenClaw Comparison)
+
+OpenClaw injects **5,000-15,000 tokens** per call because it targets cloud models with 100K+ context windows. That's the right approach for GPT-4 or Claude — they can digest thousands of tokens of instructions without losing focus.
+
+Our 1-1.5B local models have 8K-32K context windows, but their real bottleneck is **attention quality** — how much instruction they can reliably follow. After testing, ~500 tokens is the sweet spot.
+
+| | OpenClaw | Berryclaw Local | Berryclaw Cloud |
+|--|---------|----------------|----------------|
+| Target model | GPT-4, Claude (100K+ ctx) | 1-1.5B Ollama (8-32K ctx) | Grok, Gemini, etc. |
+| System prompt | 5,000-15,000 tokens | **~500 tokens** | ~2,000-5,000 tokens |
+| What's included | IDENTITY + SOUL + USER + AGENTS + TOOLS + MEMORY + skill schemas | Compressed personality, user context, rules, capabilities | Full workspace files + profile + memories |
+| Per-file cap | 20,000 chars | N/A (hand-crafted) | Full file |
+| Total cap | 150,000 chars | ~2,000 chars | No hard cap |
+| Conversation history | Full session | Last 10 messages (~500-2,000 tokens) | Last 10 messages |
+| Memory | Full MEMORY.md dump | Smart recall (keyword-triggered, ~100 tokens) | Smart recall (filtered by relevance) |
+| Tool schemas | 500-3,000 tokens | None (no tool calling) | None |
+
+**Token budget per local call:**
+
+| Layer | Tokens |
+|-------|--------|
+| System prompt (personality + rules) | ~500 |
+| Conversation history (10 messages) | ~500-2,000 |
+| Smart recall memories (when triggered) | 0-100 |
+| User's message | varies |
+| **Total** | **~1,000-3,000** |
+
+This leaves 80-90% of the model's context window free for generation. The 500-token prompt gives Berryclaw real personality — it knows who it is, who you are, and how to behave — without drowning a small model in instructions it can't follow.
 
 ### Workspace (Personality & Memory)
 Inspired by OpenClaw's workspace pattern, but adapted for the two-brain architecture:
@@ -142,6 +172,11 @@ The memory model (`memory_model` in config) handles extraction and filtering. De
 | View memory | `/memory` | — |
 | Clear memory | `/forget` | — |
 | View user profile | `/profile` | — |
+| Generate images | `/imagine <prompt>` | Cloud (Gemini) |
+| Analyze photos | `/see [question]` | Cloud (Gemini) |
+| Web search | `/search <query>` | Cloud + Exa |
+| Read documents | `/read [question]` | Cloud (Gemini) |
+| Transcribe voice | `/voice [question]` | Cloud (Gemini) |
 | Edit identity | `/identity [new content]` | — |
 | Edit personality | `/soul [new content]` | — |
 | Edit user info | `/user [new content]` | — |

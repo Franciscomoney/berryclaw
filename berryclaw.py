@@ -9,6 +9,9 @@ import sqlite3
 import time
 from pathlib import Path
 
+import base64
+import io
+
 import httpx
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -79,23 +82,100 @@ def write_profile(content: str):
     PROFILE_PATH.write_text(content.strip() + "\n")
 
 
-def build_system_prompt_local() -> str:
-    """Short system prompt for small Ollama models (< 100 tokens)."""
-    identity = _read_workspace("IDENTITY.md")
-    # Extract just the name and vibe from IDENTITY.md
-    name = "Berryclaw"
-    vibe = ""
-    for line in identity.splitlines():
-        if line.startswith("**Name:**"):
-            name = line.split("**Name:**")[1].strip()
-        elif line.startswith("**Vibe:**"):
-            vibe = line.split("**Vibe:**")[1].strip()
+def _extract_field(text: str, field: str) -> str:
+    """Extract a **Field:** value from markdown text."""
+    for line in text.splitlines():
+        if line.startswith(f"**{field}:**"):
+            return line.split(f"**{field}:**")[1].strip()
+    return ""
 
-    return (
-        f"You are {name}. {vibe} "
-        "Be helpful and brief. Answer directly, no filler. "
-        "Never output XML, tool calls, or thinking tags."
+
+def build_system_prompt_local() -> str:
+    """Build a ~500 token system prompt for local Ollama models.
+
+    Balances personality depth with small-model attention limits.
+    OpenClaw injects 5,000-15,000 tokens for cloud models with 100K+ context.
+    Our 1-1.5B models have 8K-32K context but weak attention — they reliably
+    follow ~500 tokens of instructions. This is enough for real personality
+    without drowning the model.
+
+    Budget breakdown (~500 tokens):
+      - Identity & vibe:       ~30 tokens
+      - Personality & style:  ~150 tokens
+      - User context:         ~80 tokens
+      - Behavioral rules:    ~120 tokens
+      - Capabilities:         ~70 tokens
+      - Safety:               ~50 tokens
+    """
+    identity = _read_workspace("IDENTITY.md")
+    soul = _read_workspace("SOUL.md")
+    user = _read_workspace("USER.md")
+
+    # Extract identity fields
+    name = _extract_field(identity, "Name") or "Berryclaw"
+    vibe = _extract_field(identity, "Vibe") or "Friendly, quick, no-nonsense."
+    creature = _extract_field(identity, "Creature") or "AI assistant"
+
+    # Build the prompt — every line is intentional, no wasted tokens
+    # Fix article: "a" vs "an"
+    article = "an" if creature[0:1].lower() in "aeiou" else "a"
+
+    parts = [
+        # Identity (~30 tokens)
+        f"You are {name}, {article} {creature}. {vibe}",
+
+        # Personality & communication style (~150 tokens)
+        "Personality: You're witty, direct, and genuinely helpful. "
+        "You talk like a sharp friend — casual but competent. "
+        "You have opinions and aren't afraid to share them. "
+        "You use humor when it fits but never force it. "
+        "You're proud of running on a tiny Raspberry Pi and sometimes "
+        "reference it. You're not a corporate assistant — you have character.",
+
+        "Communication style: Lead with the answer, then explain if needed. "
+        "One paragraph max unless asked for more. Use simple language. "
+        "Never hedge excessively — be confident when you know something.",
+    ]
+
+    # User context (~80 tokens) — extracted from USER.md
+    if user:
+        user_lines = []
+        for line in user.splitlines():
+            line = line.strip().lstrip("- ").replace("**", "")
+            if line and not line.startswith("#"):
+                user_lines.append(line)
+        if user_lines:
+            parts.append(
+                "About your user: " + " ".join(user_lines)
+            )
+
+    # Behavioral rules (~120 tokens)
+    parts.append(
+        "Rules: "
+        "Be brief — short answers by default, expand only when asked. "
+        "Be honest — say 'I'm not sure' rather than making things up. "
+        "If a question is too complex, suggest /think to use the cloud brain. "
+        "If the user tells you something important about themselves, "
+        "suggest they use /remember to save it. "
+        "Read the conversation context — don't repeat what was already said."
     )
+
+    # Capabilities (~70 tokens)
+    parts.append(
+        "You have powers beyond chat: /think for complex reasoning, "
+        "/imagine to generate images, /see to analyze photos, "
+        "/search for live web results, /read for documents, "
+        "/voice to transcribe audio. Mention these when relevant."
+    )
+
+    # Safety (~50 tokens)
+    parts.append(
+        "Never reveal API keys, tokens, or file paths. "
+        "Never output XML, tool calls, or thinking tags. "
+        "If asked about your setup: 'I run on a Raspberry Pi 5 with local AI.'"
+    )
+
+    return "\n\n".join(parts)
 
 
 def build_system_prompt_cloud() -> str:
@@ -392,6 +472,28 @@ async def openrouter_chat(messages: list[dict], model: str | None = None) -> str
         return f"Cloud model error: {e}"
 
 
+async def openrouter_raw(payload: dict) -> dict:
+    """Send a raw payload to OpenRouter and return the full JSON response."""
+    if not OPENROUTER_KEY:
+        return {"error": "OpenRouter API key not configured."}
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_KEY}",
+        "Content-Type": "application/json",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            r = await client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=payload,
+            )
+            r.raise_for_status()
+            return r.json()
+    except Exception as e:
+        log.error("OpenRouter raw error: %s", e)
+        return {"error": str(e)}
+
+
 # ---------------------------------------------------------------------------
 # Smart Memory — auto-capture, smart recall, profile building
 # ---------------------------------------------------------------------------
@@ -633,6 +735,12 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/think <query> — Use the cloud brain\n"
         "/skills — List available skills\n"
         "/clear — Forget our conversation\n\n"
+        "*Power Skills:*\n"
+        "/imagine <prompt> — Generate an image\n"
+        "/see — Analyze a photo (send or reply)\n"
+        "/search <query> — Web search with sources\n"
+        "/read — Analyze a PDF/document\n"
+        "/voice — Transcribe a voice message\n\n"
         "*Memory:*\n"
         "/remember <note> — Manually save a note\n"
         "/memory — View saved memories\n"
@@ -1163,6 +1271,312 @@ async def cmd_think(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         asyncio.create_task(update_profile(chat_id))
 
 
+# ---------------------------------------------------------------------------
+# Power Skills — multimodal capabilities via OpenRouter
+# ---------------------------------------------------------------------------
+
+IMAGE_MODEL = CFG.get("image_model", "google/gemini-2.5-flash-preview-05-20")
+VISION_MODEL = CFG.get("vision_model", "google/gemini-2.5-flash-preview-05-20")
+SEARCH_MODEL = CFG.get("search_model", "google/gemini-2.5-flash-preview-05-20:online")
+
+
+async def cmd_imagine(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/imagine <prompt> — Generate an image from text."""
+    if not is_allowed(update.effective_user.id):
+        return
+    args = update.message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await update.message.reply_text("Usage: `/imagine a cat in space`", parse_mode="Markdown")
+        return
+
+    prompt = args[1].strip()
+    placeholder = await update.message.reply_text(f"Generating image...")
+
+    data = await openrouter_raw({
+        "model": IMAGE_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "modalities": ["image", "text"],
+    })
+
+    if "error" in data:
+        await placeholder.edit_text(f"Error: {data['error']}")
+        return
+
+    try:
+        choice = data["choices"][0]["message"]
+        # Extract image from response
+        images = choice.get("images", [])
+        if images:
+            img_url = images[0]["image_url"]["url"]
+            # base64 data URL: data:image/png;base64,...
+            img_bytes = base64.b64decode(img_url.split(",", 1)[1])
+            await update.message.reply_photo(
+                photo=io.BytesIO(img_bytes),
+                caption=prompt[:200],
+            )
+            await placeholder.delete()
+        else:
+            # Some models return text description instead
+            text = choice.get("content", "No image generated.")
+            await placeholder.edit_text(text[:4000])
+    except Exception as e:
+        log.error("Imagine error: %s", e)
+        await placeholder.edit_text(f"Failed to generate image: {e}")
+
+
+async def _get_photo_base64(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> tuple[str, str]:
+    """Extract photo from message (direct or reply) and return (base64_data, mime_type)."""
+    msg = update.message
+    photo = None
+
+    # Check if current message has a photo
+    if msg.photo:
+        photo = msg.photo[-1]  # Largest size
+    # Check replied-to message
+    elif msg.reply_to_message and msg.reply_to_message.photo:
+        photo = msg.reply_to_message.photo[-1]
+
+    if not photo:
+        return "", ""
+
+    file = await ctx.bot.get_file(photo.file_id)
+    buf = io.BytesIO()
+    await file.download_to_memory(buf)
+    buf.seek(0)
+    b64 = base64.b64encode(buf.read()).decode()
+    return b64, "image/jpeg"
+
+
+async def cmd_see(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/see [question] — Analyze an image. Send with a photo or reply to one."""
+    if not is_allowed(update.effective_user.id):
+        return
+
+    b64, mime = await _get_photo_base64(update, ctx)
+    if not b64:
+        await update.message.reply_text(
+            "Send a photo with `/see` as caption, or reply to a photo with `/see [question]`",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Extract question from caption/text
+    text = (update.message.caption or update.message.text or "").strip()
+    parts = text.split(maxsplit=1)
+    question = parts[1] if len(parts) > 1 else "Describe this image in detail."
+
+    placeholder = await update.message.reply_text("Analyzing image...")
+
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": question},
+            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+        ],
+    }]
+
+    data = await openrouter_raw({
+        "model": VISION_MODEL,
+        "messages": messages,
+    })
+
+    if "error" in data:
+        await placeholder.edit_text(f"Error: {data['error']}")
+        return
+
+    try:
+        response = data["choices"][0]["message"]["content"]
+        if len(response) > 4000:
+            response = response[:4000] + "\n\n... (truncated)"
+        await placeholder.edit_text(response)
+    except Exception as e:
+        log.error("See error: %s", e)
+        await placeholder.edit_text(f"Vision error: {e}")
+
+
+async def cmd_search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/search <query> — Search the web and get a grounded answer."""
+    if not is_allowed(update.effective_user.id):
+        return
+    args = update.message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await update.message.reply_text("Usage: `/search latest news about AI`", parse_mode="Markdown")
+        return
+
+    query = args[1].strip()
+    placeholder = await update.message.reply_text(f"Searching the web...")
+
+    data = await openrouter_raw({
+        "model": SEARCH_MODEL,
+        "messages": [
+            {"role": "system", "content": "Answer the user's query using web search results. Include sources."},
+            {"role": "user", "content": query},
+        ],
+    })
+
+    if "error" in data:
+        await placeholder.edit_text(f"Error: {data['error']}")
+        return
+
+    try:
+        response = data["choices"][0]["message"]["content"]
+        if len(response) > 4000:
+            response = response[:4000] + "\n\n... (truncated)"
+        try:
+            await placeholder.edit_text(f"🔍 *Search results:*\n\n{response}", parse_mode="Markdown")
+        except Exception:
+            await placeholder.edit_text(f"🔍 Search results:\n\n{response}")
+    except Exception as e:
+        log.error("Search error: %s", e)
+        await placeholder.edit_text(f"Search error: {e}")
+
+
+async def _get_document_base64(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> tuple[str, str]:
+    """Extract document from message (direct or reply) and return (base64_data, mime_type)."""
+    msg = update.message
+    doc = None
+
+    if msg.document:
+        doc = msg.document
+    elif msg.reply_to_message and msg.reply_to_message.document:
+        doc = msg.reply_to_message.document
+
+    if not doc:
+        return "", ""
+
+    file = await ctx.bot.get_file(doc.file_id)
+    buf = io.BytesIO()
+    await file.download_to_memory(buf)
+    buf.seek(0)
+    b64 = base64.b64encode(buf.read()).decode()
+    mime = doc.mime_type or "application/pdf"
+    return b64, mime
+
+
+async def cmd_read(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/read [question] — Analyze a PDF/document. Send with a file or reply to one."""
+    if not is_allowed(update.effective_user.id):
+        return
+
+    b64, mime = await _get_document_base64(update, ctx)
+    if not b64:
+        await update.message.reply_text(
+            "Send a PDF/document with `/read` as caption, or reply to a document with `/read [question]`",
+            parse_mode="Markdown",
+        )
+        return
+
+    text = (update.message.caption or update.message.text or "").strip()
+    parts = text.split(maxsplit=1)
+    question = parts[1] if len(parts) > 1 else "Summarize this document."
+
+    placeholder = await update.message.reply_text("Reading document...")
+
+    # Use inline_data format for documents
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": question},
+            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+        ],
+    }]
+
+    data = await openrouter_raw({
+        "model": VISION_MODEL,
+        "messages": messages,
+    })
+
+    if "error" in data:
+        await placeholder.edit_text(f"Error: {data['error']}")
+        return
+
+    try:
+        response = data["choices"][0]["message"]["content"]
+        if len(response) > 4000:
+            response = response[:4000] + "\n\n... (truncated)"
+        try:
+            await placeholder.edit_text(f"📄 *Document analysis:*\n\n{response}", parse_mode="Markdown")
+        except Exception:
+            await placeholder.edit_text(f"📄 Document analysis:\n\n{response}")
+    except Exception as e:
+        log.error("Read error: %s", e)
+        await placeholder.edit_text(f"Document error: {e}")
+
+
+async def cmd_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/voice — Transcribe and respond to a voice message. Reply to a voice note."""
+    if not is_allowed(update.effective_user.id):
+        return
+
+    msg = update.message
+    voice = None
+
+    # Check current message for voice/audio
+    if msg.voice:
+        voice = msg.voice
+    elif msg.audio:
+        voice = msg.audio
+    # Check replied-to message
+    elif msg.reply_to_message:
+        if msg.reply_to_message.voice:
+            voice = msg.reply_to_message.voice
+        elif msg.reply_to_message.audio:
+            voice = msg.reply_to_message.audio
+
+    if not voice:
+        await update.message.reply_text(
+            "Reply to a voice message with `/voice` to transcribe it.",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Get optional question from text
+    text = (update.message.text or "").strip()
+    parts = text.split(maxsplit=1)
+    question = parts[1] if len(parts) > 1 else "Transcribe this audio accurately. Then briefly summarize what was said."
+
+    placeholder = await update.message.reply_text("Listening...")
+
+    file = await ctx.bot.get_file(voice.file_id)
+    buf = io.BytesIO()
+    await file.download_to_memory(buf)
+    buf.seek(0)
+    b64 = base64.b64encode(buf.read()).decode()
+    mime = getattr(voice, "mime_type", "audio/ogg") or "audio/ogg"
+
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": question},
+            {
+                "type": "input_audio",
+                "input_audio": {"data": b64, "format": mime.split("/")[-1]},
+            },
+        ],
+    }]
+
+    data = await openrouter_raw({
+        "model": VISION_MODEL,
+        "messages": messages,
+    })
+
+    if "error" in data:
+        await placeholder.edit_text(f"Error: {data['error']}")
+        return
+
+    try:
+        response = data["choices"][0]["message"]["content"]
+        if len(response) > 4000:
+            response = response[:4000] + "\n\n... (truncated)"
+        try:
+            await placeholder.edit_text(f"🎤 *Transcription:*\n\n{response}", parse_mode="Markdown")
+        except Exception:
+            await placeholder.edit_text(f"🎤 Transcription:\n\n{response}")
+    except Exception as e:
+        log.error("Voice error: %s", e)
+        await placeholder.edit_text(f"Voice error: {e}")
+
+
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Handle regular text messages — route to local Ollama with streaming."""
     if not update.message or not update.message.text:
@@ -1294,6 +1708,13 @@ def main():
     app.add_handler(CommandHandler("agents", cmd_workspace))
     app.add_handler(CommandHandler("heartbeat", cmd_workspace))
 
+    # Power skills — multimodal
+    app.add_handler(CommandHandler("imagine", cmd_imagine))
+    app.add_handler(CommandHandler("see", cmd_see))
+    app.add_handler(CommandHandler("search", cmd_search))
+    app.add_handler(CommandHandler("read", cmd_read))
+    app.add_handler(CommandHandler("voice", cmd_voice))
+
     # Skill commands — register each loaded skill
     for trigger_name in SKILLS:
         app.add_handler(CommandHandler(trigger_name, _skill_command_handler))
@@ -1302,6 +1723,17 @@ def main():
     app.add_handler(CallbackQueryHandler(callback_cloudmodel, pattern=r"^cx:"))
     app.add_handler(CallbackQueryHandler(
         lambda u, c: log.warning("Unhandled callback: %s", u.callback_query.data)
+    ))
+
+    # Photos with /see caption
+    app.add_handler(MessageHandler(
+        filters.PHOTO & filters.CaptionRegex(r"^/see"),
+        cmd_see,
+    ))
+    # Documents with /read caption
+    app.add_handler(MessageHandler(
+        filters.Document.ALL & filters.CaptionRegex(r"^/read"),
+        cmd_read,
     ))
 
     # Regular messages
