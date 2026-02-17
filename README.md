@@ -96,6 +96,8 @@ Or just run it directly: `python3 berryclaw.py`
 | `/identity` | Edit bot identity |
 | `/user` | Edit user context |
 | `/api` | Manage API keys from Telegram |
+| `/auth` | View/change project login credentials |
+| `/claude` | View/add Build Mode rules |
 | `/status` | Pi system stats |
 | `/clear` | Reset conversation |
 | `/start` | Guided setup with health checks |
@@ -149,6 +151,26 @@ The killer feature. Type `/build` and you get a real Claude Code agent running o
 | `glm-4.7-flash:cloud` | Fast GLM flash model |
 | `qwen3.5:cloud` | 397B hybrid vision-language |
 | `kimi-k2.5:cloud` | Multimodal agentic |
+
+**Sending images to Claude Code:**
+
+Just send a photo in Telegram while in Build Mode — drag and drop, paste, or use the camera. Berryclaw handles the rest:
+
+1. Downloads the image to `~/projects/uploads/`
+2. Auto-describes it using a vision model (Gemini Flash via OpenRouter) — layout, colors, text, sections, everything
+3. Sends both the file path and the detailed description to Claude Code
+
+This means any coding model can "see" your screenshots, even models without built-in vision. Send a screenshot of a website, a UI mockup, or a design — Claude Code gets a pixel-accurate description and can recreate it.
+
+Add a caption to give specific instructions (e.g. send a photo with "build this as a React app").
+
+**Project auth:**
+
+Every web project is protected with basic HTTP auth (the Pi is on a university LAN). Default credentials: `admin` / `berryclaw`. Change them with `/auth <user> <pass>` in Telegram.
+
+**Persistent servers:**
+
+Projects started in Build Mode keep running after you `/exit`. Claude Code starts all servers with `setsid` so they're independent of the tmux session. To stop a server: `kill $(lsof -t -i :<port>)`.
 
 ## Smart Memory
 
