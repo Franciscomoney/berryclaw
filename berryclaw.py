@@ -2773,6 +2773,31 @@ def main():
     async def post_init(application):
         global _bot_app
         _bot_app = application
+
+        # Register /commands in Telegram's menu
+        from telegram import BotCommand
+        await application.bot.set_my_commands([
+            BotCommand("start", "Setup guide & health check"),
+            BotCommand("help", "List all commands"),
+            BotCommand("think", "Ask a powerful cloud model"),
+            BotCommand("build", "Start Claude Code session"),
+            BotCommand("exit", "Exit Claude Code"),
+            BotCommand("imagine", "Generate an image"),
+            BotCommand("see", "Analyze a photo"),
+            BotCommand("search", "Search the web"),
+            BotCommand("read", "Read & summarize a document"),
+            BotCommand("model", "Switch local model"),
+            BotCommand("modelx", "Switch cloud model"),
+            BotCommand("soul", "Change personality"),
+            BotCommand("skills", "List available skills"),
+            BotCommand("remember", "Save a memory"),
+            BotCommand("memory", "View all memories"),
+            BotCommand("profile", "View your user profile"),
+            BotCommand("api", "Manage API keys"),
+            BotCommand("status", "Pi system stats"),
+            BotCommand("clear", "Reset conversation"),
+        ])
+
         asyncio.create_task(warmup_loop())
         asyncio.create_task(heartbeat_loop())
 
