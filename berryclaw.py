@@ -1276,6 +1276,115 @@ async def callback_cloudmodel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(f"🧠 Cloud model set to `{chosen}`", parse_mode="Markdown")
 
 
+async def cmd_api(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/api — manage API keys for integrations (admin only)."""
+    global INTEGRATIONS
+    if not is_allowed(update.effective_user.id):
+        return
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("Admin only.")
+        return
+
+    text = (update.message.text or "").strip()
+    parts = text.split(maxsplit=2)
+
+    # /api — show status of all keys
+    if len(parts) <= 1:
+        lines = ["*API Keys & Integrations*\n"]
+
+        # Show all secret keys and their status
+        all_keys = [
+            ("telegram_bot_token", "Telegram Bot"),
+            ("openrouter_api_key", "OpenRouter"),
+            ("firecrawl_api_key", "Firecrawl"),
+            ("apify_api_key", "Apify"),
+            ("google_credentials_file", "Google Workspace"),
+        ]
+        for key, label in all_keys:
+            val = get_secret(key)
+            if val:
+                masked = val[:8] + "..." if len(val) > 8 else val
+                lines.append(f"  `{key}`: {masked}")
+            else:
+                lines.append(f"  `{key}`: _(not set)_")
+
+        lines.append("\n*Active integrations:*")
+        if INTEGRATIONS:
+            for cmd, info in INTEGRATIONS.items():
+                lines.append(f"  /{cmd} — {info['description']}")
+        else:
+            lines.append("  _(none — add API keys to activate)_")
+
+        lines.append(
+            "\n*Commands:*\n"
+            "  `/api set <key> <value>` — set a key\n"
+            "  `/api remove <key>` — remove a key"
+        )
+
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return
+
+    action = parts[1].lower()
+
+    # /api set <key> <value>
+    if action == "set" and len(parts) >= 3:
+        rest = parts[2].split(maxsplit=1)
+        if len(rest) < 2:
+            await update.message.reply_text("Usage: `/api set <key_name> <value>`", parse_mode="Markdown")
+            return
+
+        key_name = rest[0]
+        value = rest[1]
+
+        # Update in-memory secrets
+        SECRETS[key_name] = value
+
+        # Write to disk
+        with open(SECRETS_PATH, "w") as f:
+            json.dump(SECRETS, f, indent=2)
+            f.write("\n")
+
+        # Reload integrations
+        INTEGRATIONS = load_integrations()
+
+        # Delete the user's message (contains the API key in plain text)
+        try:
+            await update.message.delete()
+        except Exception:
+            pass  # May not have delete permission
+
+        masked = value[:8] + "..." if len(value) > 8 else "***"
+        active = list(INTEGRATIONS.keys())
+        await update.effective_chat.send_message(
+            f"Set `{key_name}` = `{masked}`\n"
+            f"Active integrations: {', '.join('/' + c for c in active) if active else 'none'}",
+            parse_mode="Markdown",
+        )
+        return
+
+    # /api remove <key>
+    if action == "remove" and len(parts) >= 3:
+        key_name = parts[2].strip()
+
+        if key_name in SECRETS:
+            SECRETS[key_name] = ""
+            with open(SECRETS_PATH, "w") as f:
+                json.dump(SECRETS, f, indent=2)
+                f.write("\n")
+
+            INTEGRATIONS = load_integrations()
+            await update.message.reply_text(
+                f"Removed `{key_name}`.\nActive integrations: "
+                f"{', '.join('/' + c for c in INTEGRATIONS) if INTEGRATIONS else 'none'}",
+                parse_mode="Markdown",
+            )
+        else:
+            await update.message.reply_text(f"`{key_name}` not found in secrets.", parse_mode="Markdown")
+        return
+
+    await update.message.reply_text("Usage: `/api`, `/api set <key> <value>`, `/api remove <key>`", parse_mode="Markdown")
+
+
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_allowed(user_id):
@@ -1809,6 +1918,7 @@ def main():
     app.add_handler(CommandHandler("clear", cmd_clear))
     app.add_handler(CommandHandler("model", cmd_model))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("api", cmd_api))
     app.add_handler(CommandHandler("think", cmd_think))
     app.add_handler(CommandHandler("identity", cmd_workspace))
     app.add_handler(CommandHandler("soul", cmd_workspace))
