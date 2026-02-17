@@ -19,7 +19,7 @@
 - [x] **CONTRIBUTING.md** — How to contribute, code style, PR process.
 - [x] **GitHub issue templates** — Bug report, feature request templates.
 - [x] **Better error messages** — `_friendly_error()` helper maps raw exceptions to user-friendly messages. API key guards on all cloud commands.
-- [ ] **Rate limiting** — Per-user rate limits to prevent abuse when bot is public.
+- [x] **Rate limiting** — Per-user rate limits (30 chat/min, 10 cloud/min). Admins exempt. Configurable via config.json.
 - [ ] **Admin web dashboard** — Simple status page accessible from browser (Pi IP:port) showing stats, active users, memory usage, model info.
 - [ ] **Scheduled messages / reminders** — "Remind me in 2 hours to check the oven" via local scheduling.
 - [ ] **Inline mode** — Telegram inline queries for quick answers without opening the chat.

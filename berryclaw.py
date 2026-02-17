@@ -659,6 +659,39 @@ def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_USERS
 
 
+# ---------------------------------------------------------------------------
+# Rate limiting — per-user, two tiers
+# ---------------------------------------------------------------------------
+
+# Limits: (max_requests, window_seconds)
+RATE_LIMITS: dict[str, tuple[int, int]] = {
+    "chat":  (CFG.get("rate_limit_chat", 30),  60),   # 30 msgs/min local chat
+    "cloud": (CFG.get("rate_limit_cloud", 10),  60),   # 10 reqs/min cloud commands
+}
+
+_rate_buckets: dict[tuple[int, str], list[float]] = {}  # (user_id, tier) → [timestamps]
+
+
+def _rate_check(user_id: int, tier: str = "chat") -> str | None:
+    """Check rate limit. Returns None if OK, or a message string if limited. Admins are exempt."""
+    if is_admin(user_id):
+        return None
+    max_req, window = RATE_LIMITS.get(tier, (30, 60))
+    if max_req <= 0:
+        return None  # 0 = disabled
+    key = (user_id, tier)
+    now = time.time()
+    timestamps = _rate_buckets.get(key, [])
+    # Prune old entries
+    timestamps = [t for t in timestamps if now - t < window]
+    if len(timestamps) >= max_req:
+        wait = int(window - (now - timestamps[0])) + 1
+        return f"⏳ Slow down — limit is {max_req} per minute.\n\nTry again in {wait}s."
+    timestamps.append(now)
+    _rate_buckets[key] = timestamps
+    return None
+
+
 def _is_group_chat(update: Update) -> bool:
     """Check if message is from a group/supergroup."""
     return update.effective_chat.type in ("group", "supergroup")
@@ -2512,6 +2545,10 @@ async def cmd_think(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Route query to a powerful cloud model via OpenRouter."""
     if not is_allowed(update.effective_user.id):
         return
+    rl = _rate_check(update.effective_user.id, "cloud")
+    if rl:
+        await update.message.reply_text(rl)
+        return
 
     args = update.message.text.split(maxsplit=1)
     if len(args) < 2:
@@ -2602,6 +2639,10 @@ async def cmd_imagine(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not OPENROUTER_KEY:
         await update.message.reply_text(_friendly_error("API key not configured"))
         return
+    rl = _rate_check(update.effective_user.id, "cloud")
+    if rl:
+        await update.message.reply_text(rl)
+        return
     args = update.message.text.split(maxsplit=1)
     if len(args) < 2:
         await update.message.reply_text("Usage: `/imagine a cat in space`", parse_mode="Markdown")
@@ -2672,6 +2713,10 @@ async def cmd_see(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not OPENROUTER_KEY:
         await update.message.reply_text(_friendly_error("API key not configured"))
         return
+    rl = _rate_check(update.effective_user.id, "cloud")
+    if rl:
+        await update.message.reply_text(rl)
+        return
 
     b64, mime = await _get_photo_base64(update, ctx)
     if not b64:
@@ -2721,6 +2766,10 @@ async def cmd_search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     if not OPENROUTER_KEY:
         await update.message.reply_text(_friendly_error("API key not configured"))
+        return
+    rl = _rate_check(update.effective_user.id, "cloud")
+    if rl:
+        await update.message.reply_text(rl)
         return
     args = update.message.text.split(maxsplit=1)
     if len(args) < 2:
@@ -2783,6 +2832,10 @@ async def cmd_read(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     if not OPENROUTER_KEY:
         await update.message.reply_text(_friendly_error("API key not configured"))
+        return
+    rl = _rate_check(update.effective_user.id, "cloud")
+    if rl:
+        await update.message.reply_text(rl)
         return
 
     b64, mime = await _get_document_base64(update, ctx)
@@ -3393,6 +3446,12 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if build_model:
         # Run as background task so /exit and /stop commands aren't blocked
         asyncio.create_task(_handle_build_message(update, user_text, build_model))
+        return
+
+    # Rate limit — local chat
+    rl = _rate_check(update.effective_user.id, "chat")
+    if rl:
+        await update.message.reply_text(rl)
         return
 
     model = get_user_model(chat_id)
