@@ -51,12 +51,107 @@ The Pi is on a university LAN. This URL works from any device on the same networ
 - **Disk**: ~95GB free on `/`
 - **Ollama**: Running on localhost:11434 (for AI features if needed)
 
+## Authentication — MANDATORY
+
+**Every web project MUST have basic auth.** The Pi is on a university LAN — anyone on the network can access your ports. No exceptions.
+
+Credentials are stored in `~/projects/.auth` (JSON):
+```json
+{"username": "admin", "password": "berryclaw"}
+```
+
+Read this file at startup and require login before showing any content.
+
+### Python (FastAPI)
+
+```python
+import json
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from pathlib import Path
+
+security = HTTPBasic()
+_auth = json.loads((Path.home() / "projects" / ".auth").read_text())
+
+def verify(creds: HTTPBasicCredentials = Depends(security)):
+    if creds.username != _auth["username"] or creds.password != _auth["password"]:
+        raise HTTPException(status_code=401, detail="Unauthorized",
+                            headers={"WWW-Authenticate": "Basic"})
+    return creds.username
+
+# Add Depends(verify) to every route:
+# @app.get("/", dependencies=[Depends(verify)])
+```
+
+### Python (Flask / simple server)
+
+```python
+import json, functools
+from flask import request, Response
+from pathlib import Path
+
+_auth = json.loads((Path.home() / "projects" / ".auth").read_text())
+
+def require_auth(f):
+    @functools.wraps(f)
+    def decorated(*args, **kwargs):
+        auth = request.authorization
+        if not auth or auth.username != _auth["username"] or auth.password != _auth["password"]:
+            return Response("Login required", 401, {"WWW-Authenticate": "Basic realm='Login'"})
+        return f(*args, **kwargs)
+    return decorated
+```
+
+### Node.js (Express)
+
+```javascript
+const fs = require('fs');
+const path = require('path');
+const auth = JSON.parse(fs.readFileSync(path.join(require('os').homedir(), 'projects', '.auth')));
+
+app.use((req, res, next) => {
+  const b64 = (req.headers.authorization || '').split(' ')[1] || '';
+  const [user, pass] = Buffer.from(b64, 'base64').toString().split(':');
+  if (user === auth.username && pass === auth.password) return next();
+  res.set('WWW-Authenticate', 'Basic realm="Login"');
+  res.status(401).send('Login required');
+});
+```
+
+### Static HTML (use this server instead of python3 -m http.server)
+
+```python
+#!/usr/bin/env python3
+"""Authenticated static file server. Usage: python3 serve.py [port]"""
+import json, http.server, base64, sys
+from pathlib import Path
+
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 3000
+_auth = json.loads((Path.home() / "projects" / ".auth").read_text())
+
+class AuthHandler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        auth_header = self.headers.get("Authorization", "")
+        if auth_header.startswith("Basic "):
+            decoded = base64.b64decode(auth_header[6:]).decode()
+            user, pw = decoded.split(":", 1)
+            if user == _auth["username"] and pw == _auth["password"]:
+                return super().do_GET()
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="Login"')
+        self.end_headers()
+
+http.server.HTTPServer(("0.0.0.0", PORT), AuthHandler).serve_forever()
+```
+
+**NEVER use `python3 -m http.server` directly** — it has no auth. Use the script above for static files.
+
 ## What to Use for Web Projects
 
 For quick prototypes, prefer:
-- **Python**: `python3 -m http.server <port>` for static files, FastAPI/Flask for APIs
+- **Python**: FastAPI/Flask for APIs, the authenticated static server (above) for HTML files
 - **Node.js**: Vite, Next.js, or Express
-- **Static HTML**: Fine for simple dashboards — just serve with Python
+- **Static HTML**: Use the authenticated `serve.py` above — never bare `python3 -m http.server`
 
 Always install dependencies locally in the project folder (use venvs for Python, `npm install` for Node).
 

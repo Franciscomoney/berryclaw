@@ -1118,6 +1118,79 @@ async def cmd_workspace(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 CLAUDE_MD_PATH = Path.home() / "projects" / "CLAUDE.md"
+AUTH_FILE_PATH = Path.home() / "projects" / ".auth"
+DEFAULT_AUTH = {"username": "admin", "password": "berryclaw"}
+
+
+def _read_auth() -> dict:
+    """Read auth credentials from ~/projects/.auth."""
+    if AUTH_FILE_PATH.exists():
+        import json as _json
+        try:
+            return _json.loads(AUTH_FILE_PATH.read_text())
+        except Exception:
+            pass
+    return DEFAULT_AUTH.copy()
+
+
+def _write_auth(username: str, password: str):
+    """Write auth credentials to ~/projects/.auth."""
+    import json as _json
+    AUTH_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    AUTH_FILE_PATH.write_text(_json.dumps({"username": username, "password": password}))
+
+
+async def cmd_auth(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """View or change the login credentials for web projects."""
+    if not is_allowed(update.effective_user.id):
+        return
+
+    args = update.message.text.split(maxsplit=2)
+
+    # /auth (no args) — show current credentials
+    if len(args) < 2:
+        creds = _read_auth()
+        await update.message.reply_text(
+            f"🔐 *Project Auth*\n\n"
+            f"Username: `{creds['username']}`\n"
+            f"Password: `{creds['password']}`\n\n"
+            "All web projects use these credentials.\n"
+            "Change: `/auth <username> <password>`\n"
+            "Reset: `/auth reset`",
+            parse_mode="Markdown",
+        )
+        return
+
+    text = args[1].strip()
+
+    # /auth reset — restore defaults
+    if text.lower() == "reset":
+        _write_auth(DEFAULT_AUTH["username"], DEFAULT_AUTH["password"])
+        await update.message.reply_text(
+            f"🔄 Auth reset to `{DEFAULT_AUTH['username']}`/`{DEFAULT_AUTH['password']}`",
+            parse_mode="Markdown",
+        )
+        return
+
+    # /auth <username> <password>
+    if len(args) < 3:
+        await update.message.reply_text(
+            "Usage: `/auth <username> <password>`",
+            parse_mode="Markdown",
+        )
+        return
+
+    new_user = args[1].strip()
+    new_pass = args[2].strip()
+    _write_auth(new_user, new_pass)
+    await update.message.reply_text(
+        f"✅ Auth updated\n\n"
+        f"Username: `{new_user}`\n"
+        f"Password: `{new_pass}`\n\n"
+        "New projects will use these credentials.\n"
+        "Running projects need a restart to pick up the change.",
+        parse_mode="Markdown",
+    )
 
 
 async def cmd_claude(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -3128,6 +3201,7 @@ def main():
     app.add_handler(CommandHandler("exit", cmd_exit))
     app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("claude", cmd_claude))
+    app.add_handler(CommandHandler("auth", cmd_auth))
     app.add_handler(CommandHandler("api", cmd_api))
     app.add_handler(CommandHandler("think", cmd_think))
     app.add_handler(CommandHandler("identity", cmd_workspace))
@@ -3205,6 +3279,7 @@ def main():
             BotCommand("exit", "Exit Claude Code"),
             BotCommand("stop", "Interrupt Claude Code"),
             BotCommand("claude", "View/add Build Mode rules"),
+            BotCommand("auth", "View/change project login"),
             BotCommand("imagine", "Generate an image"),
             BotCommand("see", "Analyze a photo"),
             BotCommand("search", "Search the web"),
