@@ -1297,15 +1297,33 @@ async def cmd_api(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if len(parts) <= 1:
         lines = ["*API Keys & Integrations*\n"]
 
-        # Show all secret keys and their status
-        all_keys = [
-            ("telegram_bot_token", "Telegram Bot"),
-            ("openrouter_api_key", "OpenRouter"),
-            ("firecrawl_api_key", "Firecrawl"),
-            ("apify_api_key", "Apify"),
-            ("google_credentials_file", "Google Workspace"),
-        ]
-        for key, label in all_keys:
+        # Core keys (always shown)
+        core_keys = ["telegram_bot_token", "openrouter_api_key"]
+
+        # Auto-discover integration keys from integrations/ folder
+        integration_keys = set()
+        if INTEGRATIONS_DIR.is_dir():
+            import importlib.util
+            for filepath in sorted(INTEGRATIONS_DIR.glob("*.py")):
+                if filepath.name.startswith("_"):
+                    continue
+                try:
+                    spec = importlib.util.spec_from_file_location(filepath.stem, filepath)
+                    mod = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+                    for s in getattr(mod, "REQUIRED_SECRETS", []):
+                        integration_keys.add(s)
+                except Exception:
+                    pass
+
+        # Also include any keys already in secrets.json
+        for k in SECRETS:
+            if k not in core_keys:
+                integration_keys.add(k)
+
+        all_keys = core_keys + sorted(integration_keys)
+
+        for key in all_keys:
             val = get_secret(key)
             if val:
                 masked = val[:8] + "..." if len(val) > 8 else val
