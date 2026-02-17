@@ -1,5 +1,4 @@
 {
-  "telegram_bot_token": "YOUR_BOT_TOKEN_FROM_BOTFATHER",
   "ollama_url": "http://localhost:11434",
   "default_model": "qwen25-pi",
   "max_history": 10,
@@ -8,7 +7,6 @@
   "heartbeat_interval_seconds": 1800,
   "allowed_users": [],
   "admin_users": [],
-  "openrouter_api_key": "YOUR_OPENROUTER_API_KEY",
   "openrouter_model": "x-ai/grok-4.1-fast",
   "memory_model": "liquid/lfm-2.5-1.2b-instruct:free",
   "auto_capture": true,

@@ -29,20 +29,35 @@ from telegram.ext import (
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
+SECRETS_PATH = BASE_DIR / "secrets.json"
 WORKSPACE_DIR = BASE_DIR / "workspace"
+INTEGRATIONS_DIR = BASE_DIR / "integrations"
 
 with open(CONFIG_PATH) as f:
     CFG = json.load(f)
 
-BOT_TOKEN = CFG["telegram_bot_token"]
-OLLAMA_URL = CFG["ollama_url"].rstrip("/")
-DEFAULT_MODEL = CFG["default_model"]
+# Load secrets — separate file for API keys (gitignored)
+# Falls back to config.json for backwards compatibility
+SECRETS: dict = {}
+if SECRETS_PATH.exists():
+    with open(SECRETS_PATH) as f:
+        SECRETS = json.load(f)
+
+
+def get_secret(key: str, default: str = "") -> str:
+    """Get a secret value. Checks secrets.json first, then config.json."""
+    return SECRETS.get(key) or CFG.get(key, default)
+
+
+BOT_TOKEN = get_secret("telegram_bot_token")
+OLLAMA_URL = CFG.get("ollama_url", "http://localhost:11434").rstrip("/")
+DEFAULT_MODEL = CFG.get("default_model", "qwen25-pi")
 MAX_HISTORY = CFG.get("max_history", 10)
 STREAM_BATCH = CFG.get("stream_batch_tokens", 15)
 WARMUP_INTERVAL = CFG.get("warmup_interval_seconds", 240)
 ALLOWED_USERS: list[int] = CFG.get("allowed_users", [])
 ADMIN_USERS: list[int] = CFG.get("admin_users", [])
-OPENROUTER_KEY = CFG.get("openrouter_api_key", "")
+OPENROUTER_KEY = get_secret("openrouter_api_key")
 OPENROUTER_MODEL = CFG.get("openrouter_model", "x-ai/grok-4.1-fast")
 
 CLOUD_MODELS = [
@@ -246,6 +261,60 @@ def reload_skills():
     global SKILLS
     SKILLS = load_skills()
     log.info("Skills reloaded: %d loaded", len(SKILLS))
+
+
+# ---------------------------------------------------------------------------
+# Integrations loader — auto-discover API-powered skills from integrations/
+# ---------------------------------------------------------------------------
+
+def load_integrations() -> dict[str, dict]:
+    """Scan integrations/ for Python modules and load those with valid secrets."""
+    if not INTEGRATIONS_DIR.is_dir():
+        return {}
+
+    loaded = {}
+    import importlib.util
+
+    for filepath in sorted(INTEGRATIONS_DIR.glob("*.py")):
+        if filepath.name.startswith("_"):
+            continue
+
+        try:
+            spec = importlib.util.spec_from_file_location(filepath.stem, filepath)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+
+            name = getattr(mod, "NAME", filepath.stem)
+            commands = getattr(mod, "COMMANDS", {})
+            required = getattr(mod, "REQUIRED_SECRETS", [])
+            handle_fn = getattr(mod, "handle", None)
+
+            if not commands or not handle_fn:
+                log.warning("Integration %s: missing COMMANDS or handle()", name)
+                continue
+
+            # Check if required secrets are configured
+            missing = [s for s in required if not get_secret(s)]
+            if missing:
+                log.info("Integration %s: skipped (missing secrets: %s)", name, ", ".join(missing))
+                continue
+
+            for cmd, desc in commands.items():
+                loaded[cmd] = {
+                    "name": name,
+                    "description": desc,
+                    "handle": handle_fn,
+                    "module": mod,
+                }
+            log.info("Integration %s: loaded (%s)", name, ", ".join(f"/{c}" for c in commands))
+
+        except Exception as e:
+            log.error("Integration %s: failed to load: %s", filepath.stem, e)
+
+    return loaded
+
+
+INTEGRATIONS: dict[str, dict] = load_integrations()
 
 
 SYSTEM_PROMPT_LOCAL = build_system_prompt_local()
@@ -1031,6 +1100,53 @@ async def _skill_command_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
     await handle_skill(update, ctx)
 
 
+async def _integration_command_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Generic handler for integration commands."""
+    if not is_allowed(update.effective_user.id):
+        return
+
+    text = update.message.text or ""
+    parts = text.split(maxsplit=1)
+    command = parts[0].lstrip("/").split("@")[0]  # strip /prefix and @botname
+    args = parts[1].strip() if len(parts) > 1 else ""
+
+    integration = INTEGRATIONS.get(command)
+    if not integration:
+        await update.message.reply_text(f"Integration `/{command}` not found.")
+        return
+
+    placeholder = await update.message.reply_text(
+        f"Running {integration['name']}..."
+    )
+
+    async def cloud_chat(messages: list[dict], model: str | None = None) -> str:
+        """Callback for integrations to use the cloud model."""
+        return await openrouter_chat(messages, model=model)
+
+    try:
+        result = await integration["handle"](
+            command=command,
+            args=args,
+            secrets={k: get_secret(k) for k in SECRETS} if SECRETS else CFG,
+            cloud_chat=cloud_chat,
+        )
+
+        if not result:
+            result = "(no result)"
+
+        if len(result) > 4000:
+            result = result[:4000] + "\n\n... (truncated)"
+
+        try:
+            await placeholder.edit_text(result, parse_mode="Markdown")
+        except Exception:
+            await placeholder.edit_text(result)
+
+    except Exception as e:
+        log.error("Integration %s error: %s", command, e)
+        await placeholder.edit_text(f"Error: {e}")
+
+
 async def cmd_model(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
         return
@@ -1718,6 +1834,10 @@ def main():
     # Skill commands — register each loaded skill
     for trigger_name in SKILLS:
         app.add_handler(CommandHandler(trigger_name, _skill_command_handler))
+
+    # Integration commands — auto-discovered from integrations/
+    for cmd_name in INTEGRATIONS:
+        app.add_handler(CommandHandler(cmd_name, _integration_command_handler))
 
     app.add_handler(CallbackQueryHandler(callback_model, pattern=r"^m:"))
     app.add_handler(CallbackQueryHandler(callback_cloudmodel, pattern=r"^cx:"))
