@@ -180,7 +180,7 @@ WORKSPACE_FILES = {
 }
 
 MEMORY_PATH = WORKSPACE_DIR / "MEMORY.md"
-MEMORY_MODEL = CFG.get("memory_model", "google/gemini-2.0-flash-001")
+MEMORY_MODEL = CFG.get("memory_model", "liquid/lfm-2.5-1.2b-instruct:free")
 AUTO_CAPTURE = CFG.get("auto_capture", True)
 PROFILE_FREQUENCY = CFG.get("profile_frequency", 20)  # Update profile every N /think calls
 _think_counter: int = 0
@@ -621,13 +621,19 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "code, analysis, or anything the local model struggles with.\n\n"
         "I remember our conversation (last 10 messages) so you can "
         "have a natural back-and-forth.\n\n"
+        "*Smart Memory:*\n"
+        "After every `/think`, I automatically extract key facts "
+        "and save them to long-term memory. Before each `/think`, "
+        "I recall only the relevant memories instead of dumping everything. "
+        "Every 20 `/think` calls, I auto-build a profile of you "
+        "from our conversations.\n\n"
         "*Chat:*\n"
         "/model — Switch local AI model\n"
         "/modelx — Switch cloud AI model\n"
         "/think <query> — Use the cloud brain\n"
         "/skills — List available skills\n"
         "/clear — Forget our conversation\n\n"
-        "*Memory (auto-learns from /think):*\n"
+        "*Memory:*\n"
         "/remember <note> — Manually save a note\n"
         "/memory — View saved memories\n"
         "/profile — View auto-built user profile\n"
@@ -1173,9 +1179,27 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Save user message
     save_message(chat_id, "user", user_text)
 
-    # Build conversation
+    # Build conversation — only recall memories if the message looks like
+    # a reference to past context (keeps local prompt tiny for casual chat)
     history = get_history(chat_id)
-    messages = [{"role": "system", "content": SYSTEM_PROMPT_LOCAL}]
+    system = SYSTEM_PROMPT_LOCAL
+    _recall_keywords = (
+        "remember", "recall", "we talked", "we discussed", "you said",
+        "i told you", "last time", "earlier", "before", "what was",
+        "did i", "did we", "do you know my", "what's my", "whats my",
+        "who am i", "my name", "you mentioned", "forgot",
+    )
+    if any(kw in user_text.lower() for kw in _recall_keywords):
+        try:
+            relevant_memory = await smart_recall(user_text)
+            if relevant_memory:
+                # Cap at 300 chars to keep local model context small
+                if len(relevant_memory) > 300:
+                    relevant_memory = relevant_memory[:300] + "..."
+                system += f"\n\nRelevant memories:\n{relevant_memory}"
+        except Exception as e:
+            log.warning("Smart recall failed for chat: %s", e)
+    messages = [{"role": "system", "content": system}]
     messages.extend(history)
 
     # Send placeholder

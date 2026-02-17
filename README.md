@@ -124,7 +124,7 @@ Inspired by [supermemory](https://github.com/supermemoryai/openclaw-supermemory)
 | **Smart recall** | Before each `/think`, relevant memories are filtered and injected into the prompt — not the entire memory file. Keeps context focused. |
 | **User profile** | Every 20 `/think` calls, a profile is auto-built from conversation history and memories. Saved to `workspace/PROFILE.md`. View with `/profile`. |
 
-The memory model (`memory_model` in config) handles extraction and filtering. Defaults to `google/gemini-2.0-flash-001` — fast and cheap.
+The memory model (`memory_model` in config) handles extraction and filtering. Defaults to `liquid/lfm-2.5-1.2b-instruct:free` — free tier on OpenRouter.
 
 ## Features
 
@@ -192,7 +192,7 @@ The install script installs Python deps and creates a systemd user service that 
   "admin_users": [YOUR_TELEGRAM_USER_ID],
   "openrouter_api_key": "YOUR_OPENROUTER_KEY",
   "openrouter_model": "x-ai/grok-4.1-fast",
-  "memory_model": "google/gemini-2.0-flash-001",
+  "memory_model": "liquid/lfm-2.5-1.2b-instruct:free",
   "auto_capture": true,
   "profile_frequency": 20
 }
