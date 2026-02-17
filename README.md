@@ -211,15 +211,62 @@ Drop a Python file in `integrations/`, add the API key via `/api`, restart. Done
 }
 ```
 
-## Recommended Local Models
+## RAM Usage (Raspberry Pi 5, 8GB)
 
-| Model | Size | Speed | Quality |
-|-------|------|-------|---------|
-| `huihui_ai/qwen2.5-abliterate:1.5b` | 1.5B | Fast | Best for Pi |
-| `huihui_ai/gemma3-abliterated:1b` | 1B | Faster | Good |
-| `huihui_ai/qwen3-abliterated:0.6b` | 0.6B | Fastest | Basic |
+Berryclaw is designed to be lightweight. Here's what to expect depending on what you run:
 
-Sweet spot: **1-1.5B quantized models**. Anything above 3B is slow on Pi CPU.
+### Base processes (always running)
+
+| Process | RAM |
+|---------|-----|
+| Ollama daemon (no model loaded) | ~224 MB |
+| Berryclaw (Python bot) | ~63 MB |
+| **Base total** | **~287 MB** |
+
+### Local models (loaded into RAM when chatting)
+
+| Model | Parameters | RAM when loaded | Disk |
+|-------|-----------|----------------|------|
+| `huihui_ai/qwen3-abliterated:0.6b` | 0.6B | ~972 MB | 378 MB |
+| `huihui_ai/gemma3-abliterated:1b` | 1B | ~1,158 MB | 769 MB |
+| `huihui_ai/qwen2.5-abliterate:1.5b` | 1.5B | ~1,159 MB | 940 MB |
+| 3B model (e.g. llama3.2:3b) | 3B | ~2,200 MB | 1.9 GB |
+| 7B model (not recommended) | 7B | ~4,500 MB | 3.8 GB |
+
+Ollama unloads models after 5 minutes of inactivity. Berryclaw pings the model every 4 minutes to keep it warm and avoid the 80-second cold start.
+
+### Cloud models (Build Mode)
+
+Cloud models (`minimax-m2.5:cloud`, `deepseek-v3.1:cloud`, etc.) run on Ollama's servers — **zero local RAM** for the model itself. You only pay for Claude Code's overhead:
+
+| Process | RAM |
+|---------|-----|
+| Claude Code (Node.js, when `/build` is active) | ~336 MB |
+| tmux session | ~6 MB |
+| **Build Mode overhead** | **~342 MB** |
+
+### Real-world scenarios on Pi 5 (8GB)
+
+| Scenario | Total RAM | Free for other stuff |
+|----------|-----------|---------------------|
+| Chatting with 1.5B local model | ~1.4 GB | ~6.5 GB |
+| Chatting + Build Mode (cloud model) | ~1.7 GB | ~6.2 GB |
+| Chatting + Build Mode (local model stays warm) | ~2.0 GB | ~5.9 GB |
+| 3B local model + Build Mode | ~2.8 GB | ~5.1 GB |
+
+**Bottom line:** Even the heaviest setup (3B model + Build Mode) uses under 3 GB. You'll never run out of RAM on a Pi 5 with 8GB.
+
+**Rule of thumb for model size:** Take the parameter count, multiply by 0.6 for Q4 quantization — that's roughly the RAM in GB. A 1.5B model uses ~0.9 GB, a 3B uses ~1.8 GB, a 7B uses ~4.2 GB.
+
+### Recommended local models
+
+| Model | Speed | Quality | Best for |
+|-------|-------|---------|----------|
+| `huihui_ai/qwen2.5-abliterate:1.5b` | Fast | Best | Daily driver on Pi 5 |
+| `huihui_ai/gemma3-abliterated:1b` | Faster | Good | If you want more free RAM |
+| `huihui_ai/qwen3-abliterated:0.6b` | Fastest | Basic | Minimal setup, quick replies |
+
+Sweet spot: **1-1.5B quantized models**. Anything above 3B gets noticeably slow on CPU (~2-4 tok/s).
 
 ## Why this exists
 
