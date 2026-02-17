@@ -83,19 +83,43 @@ def _read_workspace(filename: str) -> str:
     return p.read_text().strip() if p.exists() else ""
 
 
-PROFILE_PATH = WORKSPACE_DIR / "PROFILE.md"
+PROFILE_PATH = WORKSPACE_DIR / "PROFILE.md"  # Legacy global path
+MEMORY_DIR = WORKSPACE_DIR / "memory"
 
 
-def read_profile() -> str:
-    """Read user profile."""
+def _user_memory_dir(user_id: int) -> Path:
+    """Get or create per-user memory directory."""
+    d = MEMORY_DIR / str(user_id)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def read_profile(user_id: int = 0) -> str:
+    """Read user profile. Per-user if user_id given, else legacy global."""
+    if user_id:
+        p = _user_memory_dir(user_id) / "PROFILE.md"
+        if p.exists():
+            return p.read_text().strip()
+        # Migrate: check legacy global file
+        if PROFILE_PATH.exists():
+            content = PROFILE_PATH.read_text().strip()
+            if content and "(empty" not in content:
+                p.write_text(content + "\n")
+                return content
+        return ""
+    # Legacy fallback
     if PROFILE_PATH.exists():
         return PROFILE_PATH.read_text().strip()
     return ""
 
 
-def write_profile(content: str):
+def write_profile(content: str, user_id: int = 0):
     """Write user profile."""
-    PROFILE_PATH.write_text(content.strip() + "\n")
+    if user_id:
+        p = _user_memory_dir(user_id) / "PROFILE.md"
+        p.write_text(content.strip() + "\n")
+    else:
+        PROFILE_PATH.write_text(content.strip() + "\n")
 
 
 def _extract_field(text: str, field: str) -> str:
@@ -194,7 +218,7 @@ def build_system_prompt_local() -> str:
     return "\n\n".join(parts)
 
 
-def build_system_prompt_cloud() -> str:
+def build_system_prompt_cloud(user_id: int = 0) -> str:
     """Full system prompt for cloud models (OpenRouter) — can handle complexity."""
     parts = []
     for fname in ("IDENTITY.md", "SOUL.md", "USER.md", "AGENTS.md"):
@@ -202,7 +226,7 @@ def build_system_prompt_cloud() -> str:
         if text:
             parts.append(text)
     # Append user profile if it exists
-    profile = read_profile()
+    profile = read_profile(user_id)
     if profile:
         parts.append(f"# User Profile\n\n{profile}")
     return "\n\n---\n\n".join(parts)
@@ -329,24 +353,58 @@ WORKSPACE_FILES = {
     "heartbeat": "HEARTBEAT.md",
 }
 
-MEMORY_PATH = WORKSPACE_DIR / "MEMORY.md"
+MEMORY_PATH = WORKSPACE_DIR / "MEMORY.md"  # Legacy global path
 MEMORY_MODEL = CFG.get("memory_model", "liquid/lfm-2.5-1.2b-instruct:free")
 AUTO_CAPTURE = CFG.get("auto_capture", True)
 PROFILE_FREQUENCY = CFG.get("profile_frequency", 20)  # Update profile every N /think calls
 _think_counter: int = 0
 
 
-def append_memory(note: str):
-    """Append a note to MEMORY.md."""
-    current = MEMORY_PATH.read_text() if MEMORY_PATH.exists() else ""
+def _user_memory_path(user_id: int) -> Path:
+    """Get per-user MEMORY.md path."""
+    return _user_memory_dir(user_id) / "MEMORY.md"
+
+
+def read_memory(user_id: int = 0) -> str:
+    """Read user memory. Per-user if user_id given, else legacy global."""
+    if user_id:
+        p = _user_memory_path(user_id)
+        if p.exists():
+            return p.read_text().strip()
+        # Migrate: check legacy global file
+        if MEMORY_PATH.exists():
+            content = MEMORY_PATH.read_text().strip()
+            if content and "(empty)" not in content:
+                p.write_text(content + "\n")
+                return content
+        return ""
+    # Legacy fallback
+    return _read_workspace("MEMORY.md")
+
+
+def append_memory(note: str, user_id: int = 0):
+    """Append a note to memory."""
+    if user_id:
+        p = _user_memory_path(user_id)
+        current = p.read_text() if p.exists() else ""
+    else:
+        current = MEMORY_PATH.read_text() if MEMORY_PATH.exists() else ""
     timestamp = time.strftime("%Y-%m-%d %H:%M")
     current += f"\n- [{timestamp}] {note}"
-    MEMORY_PATH.write_text(current)
+    if user_id:
+        _user_memory_dir(user_id)  # ensure dir exists
+        _user_memory_path(user_id).write_text(current)
+    else:
+        MEMORY_PATH.write_text(current)
 
 
-def clear_memory():
-    """Reset MEMORY.md to empty."""
-    MEMORY_PATH.write_text("# Berryclaw Memory\n\n(empty)\n")
+def clear_memory(user_id: int = 0):
+    """Reset memory to empty."""
+    empty = "# Berryclaw Memory\n\n(empty)\n"
+    if user_id:
+        _user_memory_path(user_id).write_text(empty)
+    else:
+        MEMORY_PATH.write_text(empty)
     reload_prompts()
 
 
@@ -717,10 +775,11 @@ async def openrouter_raw(payload: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-async def auto_capture(user_msg: str, assistant_msg: str):
-    """Extract key facts from a conversation turn and save to MEMORY.md.
+async def auto_capture(user_msg: str, assistant_msg: str, user_id: int = 0):
+    """Extract key facts from a conversation turn and save to memory.
     Runs in background after /think responses. Uses a cheap fast model."""
     try:
+        existing = read_memory(user_id) if user_id else _read_workspace("MEMORY.md")
         messages = [
             {"role": "system", "content": (
                 "You are a memory extraction system. Given a conversation between a user and an AI, "
@@ -736,7 +795,7 @@ async def auto_capture(user_msg: str, assistant_msg: str):
                 "- Never duplicate facts already in existing memory"
             )},
             {"role": "user", "content": (
-                f"Existing memory:\n{_read_workspace('MEMORY.md')}\n\n"
+                f"Existing memory:\n{existing}\n\n"
                 f"---\n\nNew conversation:\n"
                 f"User: {user_msg}\n"
                 f"Assistant: {assistant_msg[:1000]}"
@@ -744,20 +803,19 @@ async def auto_capture(user_msg: str, assistant_msg: str):
         ]
         result = await openrouter_chat(messages, model=MEMORY_MODEL)
         if result and "NOTHING" not in result.upper():
-            # Append each extracted fact
             for line in result.strip().splitlines():
                 line = line.strip()
                 if line.startswith("- "):
-                    append_memory(line[2:])
-            log.info("Auto-capture: saved facts from conversation")
+                    append_memory(line[2:], user_id)
+            log.info("Auto-capture: saved facts for user %s", user_id)
     except Exception as e:
         log.warning("Auto-capture failed: %s", e)
 
 
-async def smart_recall(query: str) -> str:
-    """Given a user query, return only the relevant memories from MEMORY.md.
+async def smart_recall(query: str, user_id: int = 0) -> str:
+    """Given a user query, return only the relevant memories.
     Uses a cheap fast model to filter. Returns empty string if no relevant memories."""
-    memory = _read_workspace("MEMORY.md")
+    memory = read_memory(user_id) if user_id else _read_workspace("MEMORY.md")
     if not memory or "(empty)" in memory:
         return ""
 
@@ -791,13 +849,13 @@ async def smart_recall(query: str) -> str:
         return memory
 
 
-async def update_profile(chat_id: int):
+async def update_profile(chat_id: int, user_id: int = 0):
     """Rebuild user profile from conversation history and memory.
     Called every PROFILE_FREQUENCY /think calls."""
     try:
         history = get_history(chat_id)
-        memory = _read_workspace("MEMORY.md")
-        current_profile = read_profile()
+        memory = read_memory(user_id) if user_id else _read_workspace("MEMORY.md")
+        current_profile = read_profile(user_id)
 
         recent_msgs = "\n".join(
             f"{m['role'].title()}: {m['content'][:200]}" for m in history[-20:]
@@ -827,9 +885,9 @@ async def update_profile(chat_id: int):
         ]
         result = await openrouter_chat(messages, model=MEMORY_MODEL)
         if result and len(result) > 20:
-            write_profile(result)
+            write_profile(result, user_id)
             reload_prompts()
-            log.info("Profile updated (%d chars)", len(result))
+            log.info("Profile updated for user %s (%d chars)", user_id, len(result))
     except Exception as e:
         log.warning("Profile update failed: %s", e)
 
@@ -1305,7 +1363,7 @@ async def cmd_remember(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: `/remember <note>`", parse_mode="Markdown")
         return
     note = args[1].strip()
-    append_memory(note)
+    append_memory(note, update.effective_user.id)
     await update.message.reply_text(f"Saved to memory.")
 
 
@@ -1313,7 +1371,7 @@ async def cmd_memory(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Show long-term memory."""
     if not is_allowed(update.effective_user.id):
         return
-    content = _read_workspace("MEMORY.md")
+    content = read_memory(update.effective_user.id)
     if not content or "(empty)" in content:
         await update.message.reply_text("Memory is empty. Use `/remember <note>` to add.", parse_mode="Markdown")
         return
@@ -1326,10 +1384,7 @@ async def cmd_forget(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Clear all long-term memory."""
     if not is_allowed(update.effective_user.id):
         return
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("Admin only.")
-        return
-    clear_memory()
+    clear_memory(update.effective_user.id)
     await update.message.reply_text("Memory cleared.")
 
 
@@ -1340,18 +1395,17 @@ async def cmd_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     args = update.message.text.split(maxsplit=1)
 
+    user_id = update.effective_user.id
+
     # /profile reset — clear profile
     if len(args) > 1 and args[1].strip().lower() == "reset":
-        if not is_admin(update.effective_user.id):
-            await update.message.reply_text("Admin only.")
-            return
-        write_profile("# User Profile\n\n(empty — will build automatically)")
+        write_profile("# User Profile\n\n(empty — will build automatically)", user_id)
         reload_prompts()
         await update.message.reply_text("Profile reset.")
         return
 
     # /profile — show it
-    profile = read_profile()
+    profile = read_profile(user_id)
     if not profile or "(empty" in profile:
         await update.message.reply_text(
             "No profile yet. It builds automatically after using `/think` a few times.",
@@ -2375,15 +2429,16 @@ async def cmd_think(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     query = args[1].strip()
     chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
     cloud_model = get_user_cloud_model(chat_id)
 
     placeholder = await update.message.reply_text(f"🧠 Thinking with `{cloud_model}`...", parse_mode="Markdown")
 
-    # Smart recall — fetch only relevant memories
-    relevant_memory = await smart_recall(query)
+    # Smart recall — fetch only relevant memories (per-user)
+    relevant_memory = await smart_recall(query, user_id)
 
-    # Build system prompt with relevant memory injected
-    system = SYSTEM_PROMPT_CLOUD
+    # Build system prompt with relevant memory injected (per-user profile)
+    system = build_system_prompt_cloud(user_id)
     if relevant_memory:
         system += f"\n\n---\n\n# Relevant Memories\n\n{relevant_memory}"
 
@@ -2430,14 +2485,14 @@ async def cmd_think(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception:
         await placeholder.edit_text(f"{header}\n\n{response}")
 
-    # Background: auto-capture facts + profile update
+    # Background: auto-capture facts + profile update (per-user)
     if AUTO_CAPTURE:
-        asyncio.create_task(auto_capture(query, full_response))
+        asyncio.create_task(auto_capture(query, full_response, user_id))
 
     global _think_counter
     _think_counter += 1
     if _think_counter % PROFILE_FREQUENCY == 0:
-        asyncio.create_task(update_profile(chat_id))
+        asyncio.create_task(update_profile(chat_id, user_id))
 
 
 # ---------------------------------------------------------------------------
@@ -3246,7 +3301,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
     if any(kw in user_text.lower() for kw in _recall_keywords):
         try:
-            relevant_memory = await smart_recall(user_text)
+            relevant_memory = await smart_recall(user_text, update.effective_user.id)
             if relevant_memory:
                 if len(relevant_memory) > 300:
                     relevant_memory = relevant_memory[:300] + "..."
@@ -3364,9 +3419,10 @@ async def handle_voice_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         save_message(chat_id, "user", transcript)
 
         # Step 2: Get AI response via cloud model
+        user_id = update.effective_user.id
         cloud_model = get_user_cloud_model(chat_id)
-        relevant_memory = await smart_recall(transcript)
-        system = SYSTEM_PROMPT_CLOUD
+        relevant_memory = await smart_recall(transcript, user_id)
+        system = build_system_prompt_cloud(user_id)
         if relevant_memory:
             system += f"\n\n---\n\n# Relevant Memories\n\n{relevant_memory}"
 
@@ -3403,9 +3459,9 @@ async def handle_voice_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 f"You: {transcript}\n\n{response[:2000]}"
             )
 
-        # Background: auto-capture
+        # Background: auto-capture (per-user)
         if AUTO_CAPTURE:
-            asyncio.create_task(auto_capture(transcript, response))
+            asyncio.create_task(auto_capture(transcript, response, user_id))
 
     except Exception as e:
         log.error("Voice handler error: %s", e)

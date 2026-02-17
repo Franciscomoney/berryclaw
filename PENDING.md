@@ -3,7 +3,7 @@
 ## Priority 1 — Must Have
 
 - [x] **Interactive setup** — `python3 berryclaw.py --setup` wizard + auto-admin on first `/start`. Install script auto-runs setup if no config exists.
-- [ ] **Multi-user memory** — MEMORY.md and PROFILE.md are currently global. Need per-user memory and profile (SQLite or separate files per user_id). Conversation history is already per chat_id.
+- [x] **Multi-user memory** — Per-user MEMORY.md and PROFILE.md stored in `workspace/memory/<user_id>/`. Auto-migrates from legacy global files. All commands (/remember, /memory, /forget, /profile, /think, voice) are per-user.
 - [x] **Offline fallback** — `/think` falls back to local Ollama when OpenRouter is down. Shows "Cloud offline — falling back to local" message.
 
 ## Priority 2 — Important
