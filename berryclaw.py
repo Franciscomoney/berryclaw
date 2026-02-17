@@ -3641,6 +3641,281 @@ async def handle_voice_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await placeholder.edit_text(_friendly_error(e, "Voice"))
 
 
+# ---------------------------------------------------------------------------
+# Admin Dashboard — lightweight web status page
+# ---------------------------------------------------------------------------
+
+DASHBOARD_PORT = CFG.get("dashboard_port", 7777)
+DASHBOARD_PASSWORD = CFG.get("dashboard_password", "berryclaw")
+_bot_start_time: float = time.time()
+
+
+def _dashboard_stats() -> dict:
+    """Gather stats for the dashboard."""
+    import subprocess
+
+    now = time.time()
+    uptime_s = int(now - _bot_start_time)
+    days, rem = divmod(uptime_s, 86400)
+    hours, rem = divmod(rem, 3600)
+    mins, _ = divmod(rem, 60)
+    bot_uptime = f"{days}d {hours}h {mins}m" if days else f"{hours}h {mins}m"
+
+    try:
+        sys_uptime = subprocess.check_output("uptime -p", shell=True, text=True).strip()
+    except Exception:
+        sys_uptime = "unknown"
+
+    try:
+        mem_info = subprocess.check_output("free -m", shell=True, text=True)
+        parts = mem_info.split("\n")[1].split()
+        mem_total, mem_used = int(parts[1]), int(parts[2])
+        mem_pct = round(mem_used / mem_total * 100)
+    except Exception:
+        mem_total, mem_used, mem_pct = 0, 0, 0
+
+    try:
+        temp_raw = subprocess.check_output(
+            "cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo 0",
+            shell=True, text=True,
+        ).strip()
+        cpu_temp = f"{int(temp_raw) / 1000:.1f}"
+    except Exception:
+        cpu_temp = "N/A"
+
+    try:
+        disk = subprocess.check_output(
+            "df -h / | awk 'NR==2{print $3\"/\"$2\" (\"$5\")\"}'",
+            shell=True, text=True,
+        ).strip()
+    except Exception:
+        disk = "unknown"
+
+    # DB stats
+    try:
+        total_msgs = DB.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        unique_users = DB.execute("SELECT COUNT(DISTINCT chat_id) FROM messages").fetchone()[0]
+        msgs_today = DB.execute(
+            "SELECT COUNT(*) FROM messages WHERE ts > ?", (now - 86400,)
+        ).fetchone()[0]
+        recent_users = DB.execute(
+            "SELECT DISTINCT chat_id FROM messages WHERE ts > ? ORDER BY ts DESC LIMIT 20",
+            (now - 86400,),
+        ).fetchall()
+        recent_user_ids = [r[0] for r in recent_users]
+    except Exception:
+        total_msgs, unique_users, msgs_today = 0, 0, 0
+        recent_user_ids = []
+
+    # Active build sessions
+    try:
+        build_sessions = DB.execute("SELECT COUNT(*) FROM build_mode").fetchone()[0]
+    except Exception:
+        build_sessions = 0
+
+    return {
+        "bot_uptime": bot_uptime,
+        "sys_uptime": sys_uptime,
+        "mem_used": mem_used,
+        "mem_total": mem_total,
+        "mem_pct": mem_pct,
+        "cpu_temp": cpu_temp,
+        "disk": disk,
+        "total_msgs": total_msgs,
+        "unique_users": unique_users,
+        "msgs_today": msgs_today,
+        "recent_user_ids": recent_user_ids,
+        "build_sessions": build_sessions,
+        "default_model": DEFAULT_MODEL,
+        "cloud_model": OPENROUTER_MODEL,
+        "ollama_url": OLLAMA_URL,
+        "admin_count": len(ADMIN_USERS),
+        "rate_chat": RATE_LIMITS["chat"],
+        "rate_cloud": RATE_LIMITS["cloud"],
+    }
+
+
+_DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="refresh" content="30">
+<title>Berryclaw Dashboard</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f8fafc;color:#1e293b;padding:20px;max-width:900px;margin:0 auto}
+h1{font-size:1.5rem;margin-bottom:20px;display:flex;align-items:center;gap:8px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-bottom:24px}
+.card{background:#fff;border-radius:10px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.card .label{font-size:.75rem;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}
+.card .value{font-size:1.4rem;font-weight:600}
+.card .sub{font-size:.8rem;color:#94a3b8;margin-top:2px}
+.section{margin-bottom:24px}
+.section h2{font-size:1.1rem;margin-bottom:10px;color:#475569}
+table{width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+th,td{text-align:left;padding:10px 14px;border-bottom:1px solid #f1f5f9}
+th{background:#f8fafc;font-size:.75rem;color:#64748b;text-transform:uppercase;letter-spacing:.5px}
+td{font-size:.9rem}
+.bar{height:8px;border-radius:4px;background:#e2e8f0;overflow:hidden;margin-top:6px}
+.bar-fill{height:100%;border-radius:4px;transition:width .3s}
+.green{background:#22c55e}.yellow{background:#eab308}.red{background:#ef4444}
+.badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:.75rem;font-weight:500}
+.badge-ok{background:#dcfce7;color:#166534}.badge-warn{background:#fef9c3;color:#854d0e}
+footer{text-align:center;color:#94a3b8;font-size:.8rem;margin-top:30px}
+</style></head><body>
+<h1>🫐 Berryclaw Dashboard</h1>
+<div class="grid">
+  <div class="card">
+    <div class="label">Bot Uptime</div>
+    <div class="value">{bot_uptime}</div>
+    <div class="sub">System: {sys_uptime}</div>
+  </div>
+  <div class="card">
+    <div class="label">RAM</div>
+    <div class="value">{mem_used} / {mem_total} MB</div>
+    <div class="bar"><div class="bar-fill {mem_color}" style="width:{mem_pct}%"></div></div>
+  </div>
+  <div class="card">
+    <div class="label">CPU Temp</div>
+    <div class="value">{cpu_temp}°C</div>
+    <div class="sub">Disk: {disk}</div>
+  </div>
+  <div class="card">
+    <div class="label">Messages Today</div>
+    <div class="value">{msgs_today}</div>
+    <div class="sub">{total_msgs} total</div>
+  </div>
+  <div class="card">
+    <div class="label">Users</div>
+    <div class="value">{unique_users}</div>
+    <div class="sub">{active_today} active today</div>
+  </div>
+  <div class="card">
+    <div class="label">Build Sessions</div>
+    <div class="value">{build_sessions}</div>
+    <div class="sub">Active now</div>
+  </div>
+</div>
+
+<div class="section">
+  <h2>Configuration</h2>
+  <table>
+    <tr><th>Setting</th><th>Value</th></tr>
+    <tr><td>Local model</td><td><code>{default_model}</code></td></tr>
+    <tr><td>Cloud model</td><td><code>{cloud_model}</code></td></tr>
+    <tr><td>Ollama URL</td><td>{ollama_url}</td></tr>
+    <tr><td>Admin users</td><td>{admin_count}</td></tr>
+    <tr><td>Rate limit (chat)</td><td>{rate_chat_max}/min</td></tr>
+    <tr><td>Rate limit (cloud)</td><td>{rate_cloud_max}/min</td></tr>
+  </table>
+</div>
+
+{recent_section}
+
+<footer>Auto-refreshes every 30 seconds · Berryclaw admin dashboard</footer>
+</body></html>"""
+
+
+def _render_dashboard() -> str:
+    stats = _dashboard_stats()
+    mem_color = "green" if stats["mem_pct"] < 60 else ("yellow" if stats["mem_pct"] < 85 else "red")
+
+    recent_section = ""
+    if stats["recent_user_ids"]:
+        rows = "".join(f"<tr><td>{uid}</td></tr>" for uid in stats["recent_user_ids"])
+        recent_section = (
+            '<div class="section"><h2>Active Users (last 24h)</h2>'
+            f'<table><tr><th>User ID</th></tr>{rows}</table></div>'
+        )
+
+    return _DASHBOARD_HTML.format(
+        bot_uptime=stats["bot_uptime"],
+        sys_uptime=stats["sys_uptime"],
+        mem_used=stats["mem_used"],
+        mem_total=stats["mem_total"],
+        mem_pct=stats["mem_pct"],
+        mem_color=mem_color,
+        cpu_temp=stats["cpu_temp"],
+        disk=stats["disk"],
+        msgs_today=stats["msgs_today"],
+        total_msgs=stats["total_msgs"],
+        unique_users=stats["unique_users"],
+        active_today=len(stats["recent_user_ids"]),
+        build_sessions=stats["build_sessions"],
+        default_model=stats["default_model"],
+        cloud_model=stats["cloud_model"],
+        ollama_url=stats["ollama_url"],
+        admin_count=stats["admin_count"],
+        rate_chat_max=stats["rate_chat"][0],
+        rate_cloud_max=stats["rate_cloud"][0],
+        recent_section=recent_section,
+    )
+
+
+def _start_dashboard():
+    """Start the admin dashboard HTTP server in a background thread."""
+    if DASHBOARD_PORT <= 0:
+        log.info("Dashboard disabled (port <= 0)")
+        return
+
+    import base64
+    import http.server
+    import threading
+
+    class DashboardHandler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, format, *args):
+            pass  # Silence access logs
+
+        def _check_auth(self) -> bool:
+            auth = self.headers.get("Authorization", "")
+            if auth.startswith("Basic "):
+                try:
+                    decoded = base64.b64decode(auth[6:]).decode()
+                    user, pw = decoded.split(":", 1)
+                    if user == "admin" and pw == DASHBOARD_PASSWORD:
+                        return True
+                except Exception:
+                    pass
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="Berryclaw Dashboard"')
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"Login required")
+            return False
+
+        def do_GET(self):
+            if not self._check_auth():
+                return
+            if self.path == "/api/stats":
+                import json as _json
+                stats = _dashboard_stats()
+                stats["recent_user_ids"] = [str(u) for u in stats["recent_user_ids"]]
+                stats["rate_chat"] = list(stats["rate_chat"])
+                stats["rate_cloud"] = list(stats["rate_cloud"])
+                body = _json.dumps(stats).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            html = _render_dashboard().encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(html)
+
+    def run():
+        try:
+            server = http.server.HTTPServer(("0.0.0.0", DASHBOARD_PORT), DashboardHandler)
+            log.info("Dashboard running on http://0.0.0.0:%d", DASHBOARD_PORT)
+            server.serve_forever()
+        except Exception as e:
+            log.error("Dashboard failed to start: %s", e)
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+
+
 async def _check_first_run_models(application):
     """On startup, if Ollama has 0 local models, notify admins with pull buttons."""
     await asyncio.sleep(3)  # Let bot fully start
@@ -3695,6 +3970,9 @@ def main():
 
     # Prune old messages on startup
     prune_old_messages()
+
+    # Start admin dashboard
+    _start_dashboard()
 
     app = Application.builder().token(BOT_TOKEN).concurrent_updates(True).build()
 

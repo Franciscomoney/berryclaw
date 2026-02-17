@@ -12,5 +12,7 @@
   "auto_capture": true,
   "profile_frequency": 20,
   "rate_limit_chat": 30,
-  "rate_limit_cloud": 10
+  "rate_limit_cloud": 10,
+  "dashboard_port": 7777,
+  "dashboard_password": "berryclaw"
 }

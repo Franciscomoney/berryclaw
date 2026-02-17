@@ -258,6 +258,30 @@ Drop a Python file in `integrations/`, add the API key via `/api`, restart. Done
 | Apify | `/apify` | `apify_api_key` |
 | Google Workspace | `/sheets`, `/docs` | `google_credentials_file` |
 
+## Admin Dashboard
+
+Berryclaw runs a web dashboard at `http://YOUR_PI_IP:7777` showing:
+
+- Bot uptime and system stats (RAM, CPU temp, disk)
+- Message counts and active users
+- Current model configuration
+- Active Build Mode sessions
+
+Protected with basic auth (default: `admin` / `berryclaw`). Auto-refreshes every 30 seconds.
+
+JSON API available at `/api/stats` for programmatic access.
+
+Configure in `config.json`:
+
+```json
+{
+  "dashboard_port": 7777,
+  "dashboard_password": "berryclaw"
+}
+```
+
+Set `dashboard_port` to `0` to disable.
+
 ## Config
 
 **config.json** — settings:
