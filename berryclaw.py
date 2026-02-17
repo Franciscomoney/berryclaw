@@ -1116,6 +1116,52 @@ async def cmd_workspace(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
+CLAUDE_MD_PATH = Path.home() / "projects" / "CLAUDE.md"
+
+
+async def cmd_claude(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """View or add rules to the Build Mode CLAUDE.md."""
+    if not is_allowed(update.effective_user.id):
+        return
+
+    args = update.message.text.split(maxsplit=1)
+
+    # /claude (no args) — show current content
+    if len(args) < 2:
+        content = CLAUDE_MD_PATH.read_text() if CLAUDE_MD_PATH.exists() else "(empty)"
+        if len(content) > 3900:
+            content = content[:3900] + "\n\n... (truncated)"
+        await update.message.reply_text(
+            f"📋 *CLAUDE.md* (Build Mode rules)\n\n```\n{content}\n```\n\n"
+            "Add a rule: `/claude <rule>`\n"
+            "Reset: `/claude reset`",
+            parse_mode="Markdown",
+        )
+        return
+
+    text = args[1].strip()
+
+    # /claude reset — restore to default
+    if text.lower() == "reset":
+        # Re-copy from raspberryclaw repo if it exists
+        default = Path.home() / "raspberryclaw" / "CLAUDE.md"
+        if default.exists():
+            CLAUDE_MD_PATH.write_text(default.read_text())
+            await update.message.reply_text("🔄 CLAUDE.md reset to defaults.")
+        else:
+            await update.message.reply_text("❌ No default CLAUDE.md found.")
+        return
+
+    # /claude <rule> — append a custom rule
+    CLAUDE_MD_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(CLAUDE_MD_PATH, "a") as f:
+        f.write(f"\n## Custom Rule\n\n{text}\n")
+
+    await update.message.reply_text(
+        f"✅ Rule added to CLAUDE.md.\n\nClaude Code will follow it next time you `/build`.",
+    )
+
+
 async def cmd_remember(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Save a note to long-term memory."""
     if not is_allowed(update.effective_user.id):
@@ -2891,6 +2937,7 @@ def main():
     app.add_handler(CommandHandler("build", cmd_build))
     app.add_handler(CommandHandler("exit", cmd_exit))
     app.add_handler(CommandHandler("stop", cmd_stop))
+    app.add_handler(CommandHandler("claude", cmd_claude))
     app.add_handler(CommandHandler("api", cmd_api))
     app.add_handler(CommandHandler("think", cmd_think))
     app.add_handler(CommandHandler("identity", cmd_workspace))
@@ -2962,6 +3009,7 @@ def main():
             BotCommand("build", "Start Claude Code session"),
             BotCommand("exit", "Exit Claude Code"),
             BotCommand("stop", "Interrupt Claude Code"),
+            BotCommand("claude", "View/add Build Mode rules"),
             BotCommand("imagine", "Generate an image"),
             BotCommand("see", "Analyze a photo"),
             BotCommand("search", "Search the web"),
