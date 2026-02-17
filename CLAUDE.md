@@ -155,14 +155,26 @@ For quick prototypes, prefer:
 
 Always install dependencies locally in the project folder (use venvs for Python, `npm install` for Node).
 
-## Running Servers
+## Running Servers — CRITICAL
 
-When starting a dev server:
-1. Use `nohup` or run in the background so it persists: `nohup python3 app.py &`
-2. Tell the user the URL
-3. To stop: `kill $(lsof -t -i :<port>)`
+Servers MUST survive after you (Claude Code) exit. **Always use `setsid`** to start servers in their own process group:
 
-For production-like persistence, create a simple systemd user service or use PM2 for Node apps.
+```bash
+setsid python3 serve.py 3000 > server.log 2>&1 &
+```
+
+**NEVER start servers without `setsid`.** Without it, the server dies when the tmux session ends.
+
+For Node.js:
+```bash
+setsid node server.js > server.log 2>&1 &
+setsid npx vite --host 0.0.0.0 --port 3000 > server.log 2>&1 &
+```
+
+After starting:
+1. Verify it's running: `lsof -i :<port>`
+2. Tell the user the full URL: `http://10.10.49.41:<port>`
+3. To stop later: `kill $(lsof -t -i :<port>)`
 
 ## Constraints
 

@@ -146,6 +146,7 @@ The killer feature. Type `/build` and you get a real Claude Code agent running o
 | `deepseek-v3.1:cloud` | 671B reasoning powerhouse |
 | `qwen3-coder-next:cloud` | Agentic coding specialist |
 | `glm-5:cloud` | 744B systems engineering |
+| `glm-4.7-flash:cloud` | Fast GLM flash model |
 | `qwen3.5:cloud` | 397B hybrid vision-language |
 | `kimi-k2.5:cloud` | Multimodal agentic |
 

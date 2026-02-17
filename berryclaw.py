@@ -607,6 +607,7 @@ CLOUD_CATALOG = [
     ("deepseek-v3.1:cloud", "671B reasoning powerhouse"),
     ("qwen3-coder-next:cloud", "Agentic coding specialist"),
     ("glm-5:cloud", "744B systems engineering"),
+    ("glm-4.7-flash:cloud", "Fast GLM flash model"),
     ("qwen3.5:cloud", "397B hybrid vision-language"),
     ("kimi-k2.5:cloud", "Multimodal agentic"),
 ]
@@ -2070,6 +2071,7 @@ async def cmd_build(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_exit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Exit Build Mode — kill tmux session, back to local chat."""
+    global _build_polling_cancel, _build_menu_future
     if not is_allowed(update.effective_user.id):
         return
 
@@ -2079,6 +2081,14 @@ async def cmd_exit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not build_model:
         await update.message.reply_text("You're not in Build Mode.")
         return
+
+    # Cancel any active polling loop immediately
+    if _build_polling_cancel is not None and not _build_polling_cancel.is_set():
+        _build_polling_cancel.set()
+    # Cancel any pending menu selection
+    if _build_menu_future and not _build_menu_future.done():
+        _build_menu_future.cancel()
+        _build_menu_future = None
 
     _stop_claude_tmux()
     exit_build_mode(chat_id)
@@ -2920,30 +2930,38 @@ async def _handle_build_message(update: Update, user_text: str, model: str):
 
 async def handle_build_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Handle photos sent in Build Mode — download and pass path to Claude Code."""
+    log.info("handle_build_photo triggered")
     if not update.message or not is_allowed(update.effective_user.id):
+        log.info("handle_build_photo: no message or not allowed")
         return
     chat_id = update.effective_chat.id
     build_model = get_build_mode(chat_id)
+    log.info("handle_build_photo: chat_id=%s build_model=%s", chat_id, build_model)
     if not build_model:
         return  # Not in build mode, let group 1 handlers deal with it
 
-    # Download the photo (largest size)
-    photo = update.message.photo[-1]
-    file = await photo.get_file()
-    uploads = Path.home() / "projects" / "uploads"
-    uploads.mkdir(parents=True, exist_ok=True)
-    filename = f"photo_{int(time.time())}_{photo.file_unique_id}.jpg"
-    filepath = uploads / filename
-    await file.download_to_drive(str(filepath))
+    try:
+        # Download the photo (largest size)
+        photo = update.message.photo[-1]
+        file = await photo.get_file()
+        uploads = Path.home() / "projects" / "uploads"
+        uploads.mkdir(parents=True, exist_ok=True)
+        filename = f"photo_{int(time.time())}_{photo.file_unique_id}.jpg"
+        filepath = uploads / filename
+        await file.download_to_drive(str(filepath))
+        log.info("handle_build_photo: downloaded to %s", filepath)
 
-    # Build the message to inject into Claude Code
-    caption = update.message.caption or ""
-    if caption:
-        msg = f"I sent you an image at {filepath}. {caption}"
-    else:
-        msg = f"I sent you an image at {filepath}. Please look at it."
+        # Build the message to inject into Claude Code
+        caption = update.message.caption or ""
+        if caption:
+            msg = f"I sent you an image at {filepath}. {caption}"
+        else:
+            msg = f"I sent you an image at {filepath}. Please look at it."
 
-    await _handle_build_message(update, msg, build_model)
+        await _handle_build_message(update, msg, build_model)
+    except Exception:
+        log.exception("handle_build_photo failed")
+        await update.message.reply_text("❌ Failed to process photo. Check logs.")
     raise ApplicationHandlerStop  # Don't let /see handler also fire
 
 
