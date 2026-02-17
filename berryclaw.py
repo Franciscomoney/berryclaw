@@ -390,6 +390,12 @@ def _db() -> sqlite3.Connection:
             model TEXT NOT NULL
         )"""
     )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS build_mode (
+            chat_id INTEGER PRIMARY KEY,
+            model TEXT NOT NULL
+        )"""
+    )
     conn.commit()
     return conn
 
@@ -448,6 +454,89 @@ def set_user_cloud_model(chat_id: int, model: str):
     DB.commit()
 
 
+def get_build_mode(chat_id: int) -> str | None:
+    """Return the cloud model name if in build mode, else None."""
+    row = DB.execute(
+        "SELECT model FROM build_mode WHERE chat_id = ?", (chat_id,)
+    ).fetchone()
+    return row[0] if row else None
+
+
+def set_build_mode(chat_id: int, model: str):
+    DB.execute(
+        "INSERT OR REPLACE INTO build_mode (chat_id, model) VALUES (?, ?)",
+        (chat_id, model),
+    )
+    DB.commit()
+
+
+def exit_build_mode(chat_id: int):
+    DB.execute("DELETE FROM build_mode WHERE chat_id = ?", (chat_id,))
+    DB.commit()
+
+
+# ---------------------------------------------------------------------------
+# Build Mode — Claude Code via tmux bridge
+# ---------------------------------------------------------------------------
+
+TMUX_SESSION = "claude-build"
+PENDING_FILE = Path.home() / ".claude" / "telegram_pending"
+CHAT_ID_FILE = Path.home() / ".claude" / "telegram_chat_id"
+
+
+def _tmux_exists() -> bool:
+    import subprocess
+    return subprocess.run(
+        ["tmux", "has-session", "-t", TMUX_SESSION],
+        capture_output=True,
+    ).returncode == 0
+
+
+def _tmux_send(text: str, literal: bool = True):
+    import subprocess
+    cmd = ["tmux", "send-keys", "-t", TMUX_SESSION]
+    if literal:
+        cmd.append("-l")
+    cmd.append(text)
+    subprocess.run(cmd)
+
+
+def _tmux_send_enter():
+    import subprocess
+    subprocess.run(["tmux", "send-keys", "-t", TMUX_SESSION, "Enter"])
+
+
+def _tmux_send_escape():
+    import subprocess
+    subprocess.run(["tmux", "send-keys", "-t", TMUX_SESSION, "Escape"])
+
+
+def _start_claude_tmux(model: str):
+    """Start Claude Code in a tmux session with the given model."""
+    import subprocess
+    # Kill existing session if any
+    subprocess.run(["tmux", "kill-session", "-t", TMUX_SESSION], capture_output=True)
+    time.sleep(0.5)
+
+    env_str = (
+        f'export ANTHROPIC_AUTH_TOKEN=ollama && '
+        f'export ANTHROPIC_BASE_URL={OLLAMA_URL} && '
+        f'export ANTHROPIC_API_KEY="" && '
+        f'export PATH="$HOME/.local/bin:$PATH" && '
+        f'claude --model {model} --dangerously-skip-permissions'
+    )
+    subprocess.run([
+        "tmux", "new-session", "-d", "-s", TMUX_SESSION,
+        "bash", "-c", env_str,
+    ])
+
+
+def _stop_claude_tmux():
+    """Kill the Claude Code tmux session."""
+    import subprocess
+    subprocess.run(["tmux", "kill-session", "-t", TMUX_SESSION], capture_output=True)
+
+
 def prune_old_messages(days: int = 7):
     cutoff = time.time() - days * 86400
     DB.execute("DELETE FROM messages WHERE ts < ?", (cutoff,))
@@ -497,7 +586,7 @@ async def ollama_stream(model: str, messages: list[dict]):
 
 
 async def ollama_list_models() -> list[str]:
-    """Get available Ollama models."""
+    """Get available Ollama models (local + cloud)."""
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             r = await client.get(f"{OLLAMA_URL}/api/tags")
@@ -507,6 +596,22 @@ async def ollama_list_models() -> list[str]:
     except Exception as e:
         log.error("Failed to list models: %s", e)
         return []
+
+
+# Popular cloud models — shown as pull options in /model
+CLOUD_CATALOG = [
+    ("minimax-m2.5:cloud", "Fast coding & productivity"),
+    ("deepseek-v3.1:cloud", "671B reasoning powerhouse"),
+    ("qwen3-coder-next:cloud", "Agentic coding specialist"),
+    ("glm-5:cloud", "744B systems engineering"),
+    ("qwen3.5:cloud", "397B hybrid vision-language"),
+    ("kimi-k2.5:cloud", "Multimodal agentic"),
+]
+
+
+def _is_cloud_model(name: str) -> bool:
+    """Check if a model name is a cloud model."""
+    return ":cloud" in name.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -702,6 +807,10 @@ async def warmup_loop():
     log.info("Warmup loop started (every %ds)", WARMUP_INTERVAL)
     while True:
         await asyncio.sleep(WARMUP_INTERVAL)
+        # Skip warmup for cloud models — they don't need local RAM
+        if _is_cloud_model(_last_used_model):
+            log.debug("Skipping warmup for cloud model %s", _last_used_model)
+            continue
         try:
             payload = {
                 "model": _last_used_model,
@@ -880,7 +989,10 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/user — View/edit user info\n"
         "/agents — View/edit agent behavior\n"
         "/status — Pi stats (admin)\n"
-        "/help — This message",
+        "/help — This message\n\n"
+        "*Cloud Mode:*\n"
+        "/build — Switch to a powerful cloud model (no GPU needed)\n"
+        "/model — Switch local models",
         parse_mode="Markdown",
     )
 
@@ -1332,11 +1444,38 @@ async def cmd_model(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
         return
 
-    # Store model list in context for callback lookup
+    # Split into local and cloud models
+    local_models = [m for m in available if not _is_cloud_model(m)]
+    cloud_models = [m for m in available if _is_cloud_model(m)]
+
     buttons = []
-    for i, m in enumerate(available):
-        label = f"✅ {m}" if m == current else m
-        buttons.append([InlineKeyboardButton(label, callback_data=f"m:{i}:{m[:50]}")])
+
+    # Local models section
+    if local_models:
+        buttons.append([InlineKeyboardButton("— Local Models (on Pi) —", callback_data="m:_header")])
+        for i, m in enumerate(local_models):
+            label = f"✅ {m}" if m == current else m
+            buttons.append([InlineKeyboardButton(label, callback_data=f"m:{i}:{m[:50]}")])
+
+    # Cloud models already pulled
+    if cloud_models:
+        buttons.append([InlineKeyboardButton("— Cloud Models (Ollama) —", callback_data="m:_header")])
+        for i, m in enumerate(cloud_models):
+            label = f"✅ {m}" if m == current else m
+            buttons.append([InlineKeyboardButton(
+                label, callback_data=f"m:{len(local_models)+i}:{m[:50]}",
+            )])
+
+    # Cloud models available to pull (not yet installed)
+    installed_names = {m.split(":")[0] for m in available}
+    pullable = [(name, desc) for name, desc in CLOUD_CATALOG
+                if name.split(":")[0] not in installed_names]
+    if pullable and get_secret("ollama_api_key"):
+        buttons.append([InlineKeyboardButton("— Add Cloud Model —", callback_data="m:_header")])
+        for name, desc in pullable[:4]:
+            buttons.append([InlineKeyboardButton(
+                f"☁️ {name} — {desc}", callback_data=f"pull:{name}",
+            )])
 
     await update.message.reply_text(
         "📦 *Pick a model:*",
@@ -1755,6 +1894,191 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_build(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Enter Build Mode — real Claude Code via tmux."""
+    if not is_allowed(update.effective_user.id):
+        return
+
+    chat_id = update.effective_chat.id
+    current_build = get_build_mode(chat_id)
+
+    # Already in build mode?
+    if current_build:
+        alive = _tmux_exists()
+        status = "running" if alive else "stopped"
+        buttons = [[InlineKeyboardButton("🚪 Exit Build Mode", callback_data="build:exit")]]
+        if not alive:
+            buttons.insert(0, [InlineKeyboardButton("🔄 Restart session", callback_data=f"build:{current_build}")])
+        await update.message.reply_text(
+            f"☁️ *Build Mode active*\n\n"
+            f"Model: `{current_build}`\n"
+            f"Session: {status}\n\n"
+            "Just type — everything goes to Claude Code.\n"
+            "Type /exit when done.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+        return
+
+    # Show model picker
+    available = await ollama_list_models()
+    pulled_cloud = [m for m in available if _is_cloud_model(m)]
+
+    buttons = []
+    for m in pulled_cloud:
+        buttons.append([InlineKeyboardButton(f"☁️ {m}", callback_data=f"build:{m}")])
+
+    pulled_names = {m.split(":")[0] for m in pulled_cloud}
+    for name, desc in CLOUD_CATALOG:
+        if name.split(":")[0] not in pulled_names:
+            buttons.append([InlineKeyboardButton(
+                f"📥 {name} — {desc}", callback_data=f"build:{name}",
+            )])
+
+    await update.message.reply_text(
+        "☁️ *Build Mode — Claude Code*\n\n"
+        "Pick a cloud model. This starts a real Claude Code\n"
+        "session on your Pi — it can read files, write code,\n"
+        "and run commands.\n\n"
+        "Type /exit when you're done.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def cmd_exit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Exit Build Mode — kill tmux session, back to local chat."""
+    if not is_allowed(update.effective_user.id):
+        return
+
+    chat_id = update.effective_chat.id
+    build_model = get_build_mode(chat_id)
+
+    if not build_model:
+        await update.message.reply_text("You're not in Build Mode.")
+        return
+
+    _stop_claude_tmux()
+    exit_build_mode(chat_id)
+    # Clean up pending files
+    if PENDING_FILE.exists():
+        PENDING_FILE.unlink()
+
+    local_model = get_user_model(chat_id)
+    await update.message.reply_text(
+        f"🏠 *Back to normal chat*\n\n"
+        f"Model: `{local_model}`\n\n"
+        "Type `/build` to start Claude Code again.",
+        parse_mode="Markdown",
+    )
+
+
+async def callback_build(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handle /build button — start/exit Claude Code tmux session."""
+    query = update.callback_query
+    if not is_allowed(query.from_user.id):
+        await query.answer("Not authorized.")
+        return
+
+    data = query.data or ""
+    if not data.startswith("build:"):
+        await query.answer()
+        return
+
+    choice = data[6:]  # After "build:"
+    chat_id = query.message.chat_id
+
+    # Exit build mode
+    if choice == "exit":
+        _stop_claude_tmux()
+        exit_build_mode(chat_id)
+        if PENDING_FILE.exists():
+            PENDING_FILE.unlink()
+        local_model = get_user_model(chat_id)
+        await query.answer("Build Mode off")
+        await query.edit_message_text(
+            f"🏠 *Back to normal chat*\n\n"
+            f"Model: `{local_model}`\n\n"
+            "Type `/build` to start Claude Code again.",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Cloud model selected — pull if needed, then start tmux session
+    model_name = choice
+    available = await ollama_list_models()
+
+    if model_name not in available:
+        # Need to pull first
+        await query.answer("Setting up…")
+        await query.edit_message_text(
+            f"☁️ *Pulling `{model_name}`…*\n\nFirst time only.",
+            parse_mode="Markdown",
+        )
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                r = await client.post(
+                    f"{OLLAMA_URL}/api/pull",
+                    json={"name": model_name, "stream": False},
+                )
+                if r.status_code == 401 or "unauthorized" in r.text.lower():
+                    import subprocess as sp, re
+                    result = sp.run(
+                        ["bash", "-c", "timeout 8 ollama signin 2>&1 || true"],
+                        capture_output=True, text=True, timeout=15,
+                        env={**__import__("os").environ, "TERM": "dumb"},
+                    )
+                    url_match = re.search(r"(https://ollama\.com/connect\S+)", result.stdout + result.stderr)
+                    if url_match:
+                        await query.edit_message_text(
+                            "🔑 *Sign in to Ollama first:*\n\n"
+                            f"[Sign in]({url_match.group(1)})\n\n"
+                            "Then tap `/build` again.",
+                            parse_mode="Markdown",
+                            disable_web_page_preview=True,
+                        )
+                    else:
+                        await query.edit_message_text("❌ Run `ollama signin` on your Pi first.", parse_mode="Markdown")
+                    return
+                r.raise_for_status()
+        except Exception as e:
+            await query.edit_message_text(f"❌ Failed: `{str(e)[:300]}`", parse_mode="Markdown")
+            return
+
+    # Start Claude Code in tmux
+    await query.answer("Starting Claude Code…")
+    await query.edit_message_text(
+        f"☁️ *Starting Claude Code…*\n\nModel: `{model_name}`",
+        parse_mode="Markdown",
+    )
+
+    _start_claude_tmux(model_name)
+    await asyncio.sleep(3)
+
+    if _tmux_exists():
+        set_build_mode(chat_id, model_name)
+        # Save chat_id for the stop hook
+        CHAT_ID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CHAT_ID_FILE.write_text(str(chat_id))
+
+        await query.edit_message_text(
+            f"☁️ *Build Mode — Claude Code is running*\n\n"
+            f"Model: `{model_name}`\n\n"
+            "Type anything — it goes straight to Claude Code.\n"
+            "Claude can read files, write code, run commands.\n\n"
+            "Type /exit when you're done.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🚪 Exit Build Mode", callback_data="build:exit"),
+            ]]),
+        )
+    else:
+        await query.edit_message_text(
+            "❌ Claude Code failed to start.\n\nCheck if it's installed: `claude --version`",
+            parse_mode="Markdown",
+        )
+
+
 async def cmd_think(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Route query to a powerful cloud model via OpenRouter."""
     if not is_allowed(update.effective_user.id):
@@ -2117,8 +2441,56 @@ async def cmd_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await placeholder.edit_text(f"Voice error: {e}")
 
 
+async def _handle_build_message(update: Update, user_text: str, model: str):
+    """Inject message into Claude Code tmux session."""
+    chat_id = update.effective_chat.id
+
+    # Check tmux session is alive
+    if not _tmux_exists():
+        # Session died — restart it
+        _start_claude_tmux(model)
+        await asyncio.sleep(3)
+        if not _tmux_exists():
+            exit_build_mode(chat_id)
+            await update.message.reply_text(
+                "❌ Claude Code session failed to start.\n\n"
+                "Type `/build` to try again.",
+                parse_mode="Markdown",
+            )
+            return
+
+    # Write chat_id so the stop hook knows where to respond
+    CHAT_ID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CHAT_ID_FILE.write_text(str(chat_id))
+
+    # Write pending marker with timestamp
+    PENDING_FILE.write_text(str(int(time.time())))
+
+    # Show typing indicator in a background loop
+    async def typing_loop():
+        while PENDING_FILE.exists():
+            try:
+                await update.get_bot().send_chat_action(chat_id, "typing")
+            except Exception:
+                pass
+            await asyncio.sleep(4)
+
+    asyncio.create_task(typing_loop())
+
+    # React to the message with a checkmark
+    try:
+        await update.message.set_reaction("✅")
+    except Exception:
+        pass
+
+    # Inject the message into Claude Code via tmux
+    _tmux_send(user_text)
+    _tmux_send_enter()
+    # Response comes back via the stop hook → Telegram API directly
+
+
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Handle regular text messages — route to local Ollama with streaming."""
+    """Handle regular text messages — route to local Ollama or cloud (build mode)."""
     if not update.message or not update.message.text:
         return
     if not is_allowed(update.effective_user.id):
@@ -2127,14 +2499,20 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     global _last_used_model
     chat_id = update.effective_chat.id
     user_text = update.message.text
+
+    # Check if user is in Build Mode → route to actual Claude Code
+    build_model = get_build_mode(chat_id)
+    if build_model:
+        await _handle_build_message(update, user_text, build_model)
+        return
+
     model = get_user_model(chat_id)
     _last_used_model = model
 
     # Save user message
     save_message(chat_id, "user", user_text)
 
-    # Build conversation — only recall memories if the message looks like
-    # a reference to past context (keeps local prompt tiny for casual chat)
+    # Normal mode — local prompt with optional memory recall
     history = get_history(chat_id)
     system = SYSTEM_PROMPT_LOCAL
     _recall_keywords = (
@@ -2147,12 +2525,12 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
             relevant_memory = await smart_recall(user_text)
             if relevant_memory:
-                # Cap at 300 chars to keep local model context small
                 if len(relevant_memory) > 300:
                     relevant_memory = relevant_memory[:300] + "..."
                 system += f"\n\nRelevant memories:\n{relevant_memory}"
         except Exception as e:
             log.warning("Smart recall failed for chat: %s", e)
+
     messages = [{"role": "system", "content": system}]
     messages.extend(history)
 
@@ -2332,6 +2710,8 @@ def main():
     app.add_handler(CommandHandler("clear", cmd_clear))
     app.add_handler(CommandHandler("model", cmd_model))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("build", cmd_build))
+    app.add_handler(CommandHandler("exit", cmd_exit))
     app.add_handler(CommandHandler("api", cmd_api))
     app.add_handler(CommandHandler("think", cmd_think))
     app.add_handler(CommandHandler("identity", cmd_workspace))
@@ -2367,6 +2747,7 @@ def main():
     app.add_handler(CallbackQueryHandler(callback_pull, pattern=r"^pull:"))
     app.add_handler(CallbackQueryHandler(callback_cloudmodel, pattern=r"^cx:"))
     app.add_handler(CallbackQueryHandler(callback_soul, pattern=r"^soul:"))
+    app.add_handler(CallbackQueryHandler(callback_build, pattern=r"^build:"))
     app.add_handler(CallbackQueryHandler(callback_api, pattern=r"^api:"))
     app.add_handler(CallbackQueryHandler(
         lambda u, c: log.warning("Unhandled callback: %s", u.callback_query.data)
