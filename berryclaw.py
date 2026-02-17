@@ -658,6 +658,42 @@ def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_USERS
 
 
+def _is_group_chat(update: Update) -> bool:
+    """Check if message is from a group/supergroup."""
+    return update.effective_chat.type in ("group", "supergroup")
+
+
+def _bot_mentioned(update: Update) -> bool:
+    """Check if bot was @mentioned or replied to in a group message."""
+    msg = update.message
+    if not msg:
+        return False
+    # Direct reply to the bot
+    if msg.reply_to_message and msg.reply_to_message.from_user:
+        if msg.reply_to_message.from_user.is_bot and _bot_username:
+            if (msg.reply_to_message.from_user.username or "").lower() == _bot_username:
+                return True
+    # @mentioned in text
+    text = msg.text or msg.caption or ""
+    if _bot_username and f"@{_bot_username}" in text.lower():
+        return True
+    # Check entities for mention
+    for ent in msg.entities or []:
+        if ent.type == "mention":
+            mention = text[ent.offset:ent.offset + ent.length].lower()
+            if mention == f"@{_bot_username}":
+                return True
+    return False
+
+
+def _strip_mention(text: str) -> str:
+    """Remove @botname from message text."""
+    if _bot_username:
+        import re
+        text = re.sub(rf"@{re.escape(_bot_username)}\b", "", text, flags=re.IGNORECASE).strip()
+    return text
+
+
 # ---------------------------------------------------------------------------
 # Ollama streaming chat
 # ---------------------------------------------------------------------------
@@ -899,6 +935,7 @@ async def update_profile(chat_id: int, user_id: int = 0):
 _last_used_model: str = DEFAULT_MODEL
 HEARTBEAT_INTERVAL = CFG.get("heartbeat_interval_seconds", 1800)  # 30 min
 _bot_app = None  # Set in main() for heartbeat messaging
+_bot_username: str = ""  # Set in post_init for @mention detection
 
 
 async def warmup_loop():
@@ -3251,6 +3288,14 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_text = update.message.text
 
+    # Group chat: only respond if @mentioned or replied to
+    if _is_group_chat(update):
+        if not _bot_mentioned(update):
+            return
+        user_text = _strip_mention(user_text)
+        if not user_text:
+            return
+
     # Check if we're waiting for an API key paste
     if chat_id in _api_awaiting_key and is_admin(update.effective_user.id):
         key_name = _api_awaiting_key.pop(chat_id)
@@ -3376,6 +3421,9 @@ async def handle_voice_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.voice:
         return
     if not is_allowed(update.effective_user.id):
+        return
+    # Group chat: only respond to voice if it's a reply to the bot
+    if _is_group_chat(update) and not _bot_mentioned(update):
         return
 
     deepgram_key = get_secret("deepgram_api_key")
@@ -3560,8 +3608,11 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     async def post_init(application):
-        global _bot_app
+        global _bot_app, _bot_username
         _bot_app = application
+        me = await application.bot.get_me()
+        _bot_username = (me.username or "").lower()
+        log.info("Bot username: @%s", _bot_username)
 
         # Register /commands in Telegram's menu
         from telegram import BotCommand

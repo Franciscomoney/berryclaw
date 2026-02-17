@@ -8,7 +8,7 @@
 
 ## Priority 2 — Important
 
-- [ ] **Group chat support** — Respond only when @mentioned or replied to. Per-group conversation history. Group-aware personality.
+- [x] **Group chat support** — Respond only when @mentioned or replied to. Per-group conversation history. Group-aware personality.
 - [x] **Voice output (TTS)** — Deepgram integration with `/voice` picker (12 voices, per-user selection).
 - [ ] **Model auto-pull** — On first run, if no Ollama models exist, auto-pull a recommended model (e.g., `huihui_ai/qwen2.5-abliterate:1.5b`) or guide the user.
 - [ ] **Docker option** — `docker-compose.yml` with Berryclaw + Ollama for one-command deploy.
