@@ -2569,6 +2569,24 @@ def _extract_claude_response(pane_before: str, pane_now: str) -> str:
     return "\n".join(cleaned).strip()
 
 
+def _detect_interactive_menu(pane: str) -> bool:
+    """Detect if Claude Code is showing an interactive selection menu.
+
+    Interactive menus (AskUserQuestion) show ❯ with text (selected option).
+    The normal input prompt shows ❯ alone (empty). We check the bottom of
+    the pane for ❯ followed by option text — that means a menu is blocking.
+    """
+    lines = pane.strip().splitlines()
+    if not lines:
+        return False
+    # Check last 8 lines (where interactive UI appears)
+    for line in lines[-8:]:
+        s = line.strip()
+        if s.startswith("❯ ") and len(s) > 3:
+            return True
+    return False
+
+
 async def _handle_build_message(update: Update, user_text: str, model: str):
     """Inject message into Claude Code tmux session and stream output back."""
     global _build_polling_cancel
@@ -2680,6 +2698,11 @@ async def _handle_build_message(update: Update, user_text: str, model: str):
                     if s.startswith("⏵⏵"):
                         idle_count = 999
                         break
+                # Auto-dismiss interactive menus (AskUserQuestion)
+                # These show ❯ with option text — auto-press Enter to pick first option
+                if idle_count < 999 and _detect_interactive_menu(pane_check):
+                    _tmux_send_enter()
+                    idle_count = 0
                 if idle_count >= 999:
                     break
             continue
