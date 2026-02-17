@@ -809,7 +809,12 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/see — Analyze a photo (send or reply)\n"
         "/search <query> — Web search with sources\n"
         "/read — Analyze a PDF/document\n"
-        "/voice — Transcribe a voice message\n\n"
+        "/voice — Transcribe a voice message\n"
+        "Send a voice note — Voice chat (needs Deepgram)\n\n"
+        "*Integrations (/api to manage):*\n"
+        "/scrape — Scrape websites (Firecrawl)\n"
+        "/apify — Run scrapers (Apify)\n"
+        "/sheets /docs — Google Workspace\n\n"
         "*Memory:*\n"
         "/remember <note> — Manually save a note\n"
         "/memory — View saved memories\n"
@@ -1897,6 +1902,105 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------------------------
+# Voice message handler — auto voice-in/voice-out with Deepgram
+# ---------------------------------------------------------------------------
+
+async def handle_voice_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handle incoming voice messages — transcribe, respond, speak back."""
+    if not update.message or not update.message.voice:
+        return
+    if not is_allowed(update.effective_user.id):
+        return
+
+    deepgram_key = get_secret("deepgram_api_key")
+    if not deepgram_key:
+        # No Deepgram key — fall back to just acknowledging
+        await update.message.reply_text(
+            "I heard you! But I need a Deepgram API key to process voice.\n"
+            "Add one with: `/api set deepgram_api_key YOUR_KEY`",
+            parse_mode="Markdown",
+        )
+        return
+
+    chat_id = update.effective_chat.id
+    voice = update.message.voice
+
+    placeholder = await update.message.reply_text("Listening...")
+
+    try:
+        # Download voice file
+        file = await ctx.bot.get_file(voice.file_id)
+        buf = io.BytesIO()
+        await file.download_to_memory(buf)
+        buf.seek(0)
+        audio_bytes = buf.read()
+        mime = voice.mime_type or "audio/ogg"
+
+        # Import deepgram integration
+        from integrations.deepgram import transcribe, synthesize
+
+        # Step 1: Transcribe
+        await placeholder.edit_text("Transcribing...")
+        transcript = await transcribe(audio_bytes, deepgram_key, mime)
+
+        if not transcript:
+            await placeholder.edit_text("Couldn't understand the audio. Try again?")
+            return
+
+        await placeholder.edit_text(f"You said: _{transcript}_\n\nThinking...", parse_mode="Markdown")
+
+        # Save user message
+        save_message(chat_id, "user", transcript)
+
+        # Step 2: Get AI response via cloud model
+        cloud_model = get_user_cloud_model(chat_id)
+        relevant_memory = await smart_recall(transcript)
+        system = SYSTEM_PROMPT_CLOUD
+        if relevant_memory:
+            system += f"\n\n---\n\n# Relevant Memories\n\n{relevant_memory}"
+
+        history = get_history(chat_id)
+        messages = [{"role": "system", "content": system}]
+        messages.extend(history)
+        messages.append({"role": "user", "content": transcript})
+
+        response = await openrouter_chat(messages, model=cloud_model)
+        save_message(chat_id, "assistant", response)
+
+        # Step 3: Convert response to speech
+        await placeholder.edit_text(f"Speaking...")
+
+        # Truncate for TTS (Deepgram has limits)
+        tts_text = response[:1000] if len(response) > 1000 else response
+        audio_response = await synthesize(tts_text, deepgram_key)
+
+        # Step 4: Send voice note back
+        await update.message.reply_voice(
+            voice=io.BytesIO(audio_response),
+            caption=response[:200] if len(response) > 200 else response,
+        )
+
+        # Update placeholder with transcript
+        try:
+            await placeholder.edit_text(
+                f"You: _{transcript}_\n\n{response[:2000]}",
+                parse_mode="Markdown",
+            )
+        except Exception:
+            await placeholder.edit_text(
+                f"You: {transcript}\n\n{response[:2000]}"
+            )
+
+        # Background: auto-capture
+        if AUTO_CAPTURE:
+            asyncio.create_task(auto_capture(transcript, response))
+
+    except Exception as e:
+        log.error("Voice handler error: %s", e)
+        await placeholder.edit_text(f"Voice error: {e}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -1965,6 +2069,9 @@ def main():
         filters.Document.ALL & filters.CaptionRegex(r"^/read"),
         cmd_read,
     ))
+
+    # Voice messages — auto voice-in/voice-out with Deepgram
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
 
     # Regular messages
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
