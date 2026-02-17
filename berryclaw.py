@@ -3009,7 +3009,7 @@ async def handle_build_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parts.append("\n\nPlease recreate what you see in this image.")
         msg = "".join(parts)
 
-        await _handle_build_message(update, msg, build_model)
+        asyncio.create_task(_handle_build_message(update, msg, build_model))
     except Exception:
         log.exception("handle_build_photo failed")
         await update.message.reply_text("❌ Failed to process photo. Check logs.")
@@ -3041,7 +3041,7 @@ async def handle_build_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         msg = f"I sent you a file at {filepath} ({doc.file_name}). Please read it."
 
-    await _handle_build_message(update, msg, build_model)
+    asyncio.create_task(_handle_build_message(update, msg, build_model))
     raise ApplicationHandlerStop
 
 
@@ -3059,7 +3059,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Check if user is in Build Mode → route to actual Claude Code
     build_model = get_build_mode(chat_id)
     if build_model:
-        await _handle_build_message(update, user_text, build_model)
+        # Run as background task so /exit and /stop commands aren't blocked
+        asyncio.create_task(_handle_build_message(update, user_text, build_model))
         return
 
     model = get_user_model(chat_id)
@@ -3258,7 +3259,7 @@ def main():
     # Prune old messages on startup
     prune_old_messages()
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).concurrent_updates(True).build()
 
     # Commands
     app.add_handler(CommandHandler("start", cmd_start))
