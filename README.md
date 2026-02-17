@@ -72,6 +72,7 @@ Or just run it directly: `python3 berryclaw.py`
 | `/see` | Analyze a photo (reply to an image) |
 | `/search <query>` | Search the web |
 | `/read` | Read and summarize a document (reply to a file) |
+| `/voice` | Pick TTS voice (12 voices, buttons) |
 | Send a voice note | Voice chat — transcribes, responds, speaks back |
 
 ### Skills & memory

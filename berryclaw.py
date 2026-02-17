@@ -1016,7 +1016,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/see — Analyze a photo (send or reply)\n"
         "/search <query> — Web search with sources\n"
         "/read — Analyze a PDF/document\n"
-        "/voice — Transcribe a voice message\n"
+        "/voice — Pick TTS voice or transcribe a voice message\n"
         "Send a voice note — Voice chat (needs Deepgram)\n\n"
         "*Integrations (/api to manage):*\n"
         "/scrape — Scrape websites (Firecrawl)\n"
@@ -1034,9 +1034,13 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/agents — View/edit agent behavior\n"
         "/status — Pi stats (admin)\n"
         "/help — This message\n\n"
-        "*Cloud Mode:*\n"
-        "/build — Switch to a powerful cloud model (no GPU needed)\n"
-        "/model — Switch local models",
+        "*Build Mode (Claude Code):*\n"
+        "/build — Start Claude Code with a cloud model\n"
+        "/stop — Interrupt Claude Code\n"
+        "/exit — Exit Build Mode\n"
+        "/claude — View/add Build Mode rules\n"
+        "/auth — View/change project login\n"
+        "/api — Manage API keys (tap to set)",
         parse_mode="Markdown",
     )
 
@@ -3482,6 +3486,7 @@ def main():
             BotCommand("see", "Analyze a photo"),
             BotCommand("search", "Search the web"),
             BotCommand("read", "Read & summarize a document"),
+            BotCommand("voice", "Pick TTS voice"),
             BotCommand("model", "Switch local model"),
             BotCommand("modelx", "Switch cloud model"),
             BotCommand("soul", "Change personality"),
