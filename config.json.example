@@ -9,5 +9,8 @@
   "allowed_users": [],
   "admin_users": [],
   "openrouter_api_key": "YOUR_OPENROUTER_API_KEY",
-  "openrouter_model": "x-ai/grok-4.1-fast"
+  "openrouter_model": "x-ai/grok-4.1-fast",
+  "memory_model": "google/gemini-2.0-flash-001",
+  "auto_capture": true,
+  "profile_frequency": 20
 }

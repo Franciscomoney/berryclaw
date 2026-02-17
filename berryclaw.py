@@ -64,6 +64,21 @@ def _read_workspace(filename: str) -> str:
     return p.read_text().strip() if p.exists() else ""
 
 
+PROFILE_PATH = WORKSPACE_DIR / "PROFILE.md"
+
+
+def read_profile() -> str:
+    """Read user profile."""
+    if PROFILE_PATH.exists():
+        return PROFILE_PATH.read_text().strip()
+    return ""
+
+
+def write_profile(content: str):
+    """Write user profile."""
+    PROFILE_PATH.write_text(content.strip() + "\n")
+
+
 def build_system_prompt_local() -> str:
     """Short system prompt for small Ollama models (< 100 tokens)."""
     identity = _read_workspace("IDENTITY.md")
@@ -90,10 +105,10 @@ def build_system_prompt_cloud() -> str:
         text = _read_workspace(fname)
         if text:
             parts.append(text)
-    # Append memory if it exists
-    memory = _read_workspace("MEMORY.md")
-    if memory:
-        parts.append(f"# Long-Term Memory\n\n{memory}")
+    # Append user profile if it exists
+    profile = read_profile()
+    if profile:
+        parts.append(f"# User Profile\n\n{profile}")
     return "\n\n---\n\n".join(parts)
 
 
@@ -165,6 +180,10 @@ WORKSPACE_FILES = {
 }
 
 MEMORY_PATH = WORKSPACE_DIR / "MEMORY.md"
+MEMORY_MODEL = CFG.get("memory_model", "google/gemini-2.0-flash-001")
+AUTO_CAPTURE = CFG.get("auto_capture", True)
+PROFILE_FREQUENCY = CFG.get("profile_frequency", 20)  # Update profile every N /think calls
+_think_counter: int = 0
 
 
 def append_memory(note: str):
@@ -173,7 +192,6 @@ def append_memory(note: str):
     timestamp = time.strftime("%Y-%m-%d %H:%M")
     current += f"\n- [{timestamp}] {note}"
     MEMORY_PATH.write_text(current)
-    reload_prompts()
 
 
 def clear_memory():
@@ -375,6 +393,128 @@ async def openrouter_chat(messages: list[dict], model: str | None = None) -> str
 
 
 # ---------------------------------------------------------------------------
+# Smart Memory — auto-capture, smart recall, profile building
+# ---------------------------------------------------------------------------
+
+
+async def auto_capture(user_msg: str, assistant_msg: str):
+    """Extract key facts from a conversation turn and save to MEMORY.md.
+    Runs in background after /think responses. Uses a cheap fast model."""
+    try:
+        messages = [
+            {"role": "system", "content": (
+                "You are a memory extraction system. Given a conversation between a user and an AI, "
+                "extract ONLY key facts worth remembering long-term. These are facts about:\n"
+                "- The user (name, preferences, projects, skills, goals)\n"
+                "- Decisions made\n"
+                "- Important information shared\n\n"
+                "Rules:\n"
+                "- Return one fact per line, starting with '- '\n"
+                "- Be concise (max 15 words per fact)\n"
+                "- Skip small talk, greetings, and generic questions\n"
+                "- If there's nothing worth remembering, respond with exactly: NOTHING\n"
+                "- Never duplicate facts already in existing memory"
+            )},
+            {"role": "user", "content": (
+                f"Existing memory:\n{_read_workspace('MEMORY.md')}\n\n"
+                f"---\n\nNew conversation:\n"
+                f"User: {user_msg}\n"
+                f"Assistant: {assistant_msg[:1000]}"
+            )},
+        ]
+        result = await openrouter_chat(messages, model=MEMORY_MODEL)
+        if result and "NOTHING" not in result.upper():
+            # Append each extracted fact
+            for line in result.strip().splitlines():
+                line = line.strip()
+                if line.startswith("- "):
+                    append_memory(line[2:])
+            log.info("Auto-capture: saved facts from conversation")
+    except Exception as e:
+        log.warning("Auto-capture failed: %s", e)
+
+
+async def smart_recall(query: str) -> str:
+    """Given a user query, return only the relevant memories from MEMORY.md.
+    Uses a cheap fast model to filter. Returns empty string if no relevant memories."""
+    memory = _read_workspace("MEMORY.md")
+    if not memory or "(empty)" in memory:
+        return ""
+
+    # If memory is short, just return all of it
+    lines = [l for l in memory.splitlines() if l.strip().startswith("- ")]
+    if len(lines) <= 5:
+        return memory
+
+    try:
+        messages = [
+            {"role": "system", "content": (
+                "You are a memory retrieval system. Given a user's question and a list of memories, "
+                "return ONLY the memories that are relevant to answering the question.\n\n"
+                "Rules:\n"
+                "- Copy relevant memories exactly as they are (keep the '- ' prefix)\n"
+                "- If no memories are relevant, respond with exactly: NONE\n"
+                "- Be selective — only include memories that would actually help answer the question\n"
+                "- Maximum 10 memories"
+            )},
+            {"role": "user", "content": (
+                f"Question: {query}\n\n"
+                f"All memories:\n{memory}"
+            )},
+        ]
+        result = await openrouter_chat(messages, model=MEMORY_MODEL)
+        if result and "NONE" not in result.upper():
+            return result.strip()
+        return ""
+    except Exception as e:
+        log.warning("Smart recall failed, using full memory: %s", e)
+        return memory
+
+
+async def update_profile(chat_id: int):
+    """Rebuild user profile from conversation history and memory.
+    Called every PROFILE_FREQUENCY /think calls."""
+    try:
+        history = get_history(chat_id)
+        memory = _read_workspace("MEMORY.md")
+        current_profile = read_profile()
+
+        recent_msgs = "\n".join(
+            f"{m['role'].title()}: {m['content'][:200]}" for m in history[-20:]
+        )
+
+        messages = [
+            {"role": "system", "content": (
+                "You are a profile builder. Given conversation history, memories, and an existing profile, "
+                "create an updated user profile.\n\n"
+                "The profile should contain:\n"
+                "- Name and basic info\n"
+                "- Interests and skills\n"
+                "- Current projects\n"
+                "- Preferences (language, communication style, etc.)\n"
+                "- Goals\n\n"
+                "Rules:\n"
+                "- Keep it under 20 lines\n"
+                "- Use bullet points\n"
+                "- Merge new info with existing profile (don't lose old facts)\n"
+                "- If nothing new to add, return the existing profile unchanged"
+            )},
+            {"role": "user", "content": (
+                f"Existing profile:\n{current_profile or '(empty)'}\n\n"
+                f"Recent memories:\n{memory}\n\n"
+                f"Recent conversation:\n{recent_msgs}"
+            )},
+        ]
+        result = await openrouter_chat(messages, model=MEMORY_MODEL)
+        if result and len(result) > 20:
+            write_profile(result)
+            reload_prompts()
+            log.info("Profile updated (%d chars)", len(result))
+    except Exception as e:
+        log.warning("Profile update failed: %s", e)
+
+
+# ---------------------------------------------------------------------------
 # Warmup — keep model loaded in memory
 # ---------------------------------------------------------------------------
 
@@ -457,7 +597,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     model = get_user_model(update.effective_chat.id)
     await update.message.reply_text(
-        f"🍓 *Berryclaw* is online!\n\n"
+        f"🫐 *Berryclaw* is online!\n\n"
         f"Running on Raspberry Pi 5 with local AI.\n"
         f"Current model: `{model}`\n\n"
         f"Commands: /help",
@@ -470,7 +610,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     model = get_user_model(update.effective_chat.id)
     await update.message.reply_text(
-        "🍓 *Berryclaw — Your Pocket AI*\n\n"
+        "🫐 *Berryclaw — Your Pocket AI*\n\n"
         "I'm an AI running locally on a Raspberry Pi 5. "
         "I have two brains:\n\n"
         f"*Local brain* (`{model}`): Fast, private, runs on the Pi. "
@@ -487,9 +627,10 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/think <query> — Use the cloud brain\n"
         "/skills — List available skills\n"
         "/clear — Forget our conversation\n\n"
-        "*Memory:*\n"
-        "/remember <note> — Save to long-term memory\n"
+        "*Memory (auto-learns from /think):*\n"
+        "/remember <note> — Manually save a note\n"
         "/memory — View saved memories\n"
+        "/profile — View auto-built user profile\n"
         "/forget — Clear all memory (admin)\n\n"
         "*Config:*\n"
         "/identity — View/edit bot identity\n"
@@ -586,6 +727,36 @@ async def cmd_forget(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     clear_memory()
     await update.message.reply_text("Memory cleared.")
+
+
+async def cmd_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """View or reset user profile."""
+    if not is_allowed(update.effective_user.id):
+        return
+
+    args = update.message.text.split(maxsplit=1)
+
+    # /profile reset — clear profile
+    if len(args) > 1 and args[1].strip().lower() == "reset":
+        if not is_admin(update.effective_user.id):
+            await update.message.reply_text("Admin only.")
+            return
+        write_profile("# User Profile\n\n(empty — will build automatically)")
+        reload_prompts()
+        await update.message.reply_text("Profile reset.")
+        return
+
+    # /profile — show it
+    profile = read_profile()
+    if not profile or "(empty" in profile:
+        await update.message.reply_text(
+            "No profile yet. It builds automatically after using `/think` a few times.",
+            parse_mode="Markdown",
+        )
+        return
+    if len(profile) > 3900:
+        profile = profile[:3900] + "\n\n... (truncated)"
+    await update.message.reply_text(f"👤 *User Profile*\n\n{profile}", parse_mode="Markdown")
 
 
 async def cmd_skills(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -918,7 +1089,7 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg_count = DB.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
 
     await update.message.reply_text(
-        f"🍓 *Berryclaw Status*\n\n"
+        f"🫐 *Berryclaw Status*\n\n"
         f"Uptime: {uptime}\n"
         f"RAM: {mem}\n"
         f"CPU Temp: {temp}\n"
@@ -946,9 +1117,17 @@ async def cmd_think(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     placeholder = await update.message.reply_text(f"🧠 Thinking with `{cloud_model}`...", parse_mode="Markdown")
 
-    # Build messages with history + cloud system prompt
+    # Smart recall — fetch only relevant memories
+    relevant_memory = await smart_recall(query)
+
+    # Build system prompt with relevant memory injected
+    system = SYSTEM_PROMPT_CLOUD
+    if relevant_memory:
+        system += f"\n\n---\n\n# Relevant Memories\n\n{relevant_memory}"
+
+    # Build messages with history
     history = get_history(chat_id)
-    messages = [{"role": "system", "content": SYSTEM_PROMPT_CLOUD}]
+    messages = [{"role": "system", "content": system}]
     messages.extend(history)
     messages.append({"role": "user", "content": query})
 
@@ -959,10 +1138,23 @@ async def cmd_think(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     save_message(chat_id, "assistant", response)
 
     # Truncate if too long for Telegram (4096 char limit)
+    full_response = response
     if len(response) > 4000:
         response = response[:4000] + "\n\n... (truncated)"
 
-    await placeholder.edit_text(f"🧠 *Cloud response:*\n\n{response}", parse_mode="Markdown")
+    try:
+        await placeholder.edit_text(f"🧠 *Cloud response:*\n\n{response}", parse_mode="Markdown")
+    except Exception:
+        await placeholder.edit_text(f"🧠 Cloud response:\n\n{response}")
+
+    # Background: auto-capture facts + profile update
+    if AUTO_CAPTURE:
+        asyncio.create_task(auto_capture(query, full_response))
+
+    global _think_counter
+    _think_counter += 1
+    if _think_counter % PROFILE_FREQUENCY == 0:
+        asyncio.create_task(update_profile(chat_id))
 
 
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1071,6 +1263,7 @@ def main():
     app.add_handler(CommandHandler("remember", cmd_remember))
     app.add_handler(CommandHandler("memory", cmd_memory))
     app.add_handler(CommandHandler("forget", cmd_forget))
+    app.add_handler(CommandHandler("profile", cmd_profile))
     app.add_handler(CommandHandler("skills", cmd_skills))
     app.add_handler(CommandHandler("newskill", cmd_newskill))
     app.add_handler(CommandHandler("deleteskill", cmd_deleteskill))

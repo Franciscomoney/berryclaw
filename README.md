@@ -1,4 +1,4 @@
-# 🍓 Berryclaw
+# 🫐 Berryclaw
 
 A lightweight Telegram bot optimized for **Raspberry Pi 5 + Ollama**. Two brains: a fast local model for casual chat, and a powerful cloud model (via OpenRouter) for complex tasks.
 
@@ -88,6 +88,7 @@ workspace/
 ├── AGENTS.md         # Session behavior protocol (cloud only)
 ├── HEARTBEAT.md      # Periodic background tasks (cloud only)
 ├── MEMORY.md         # Long-term memory — bot writes, persists across restarts
+├── PROFILE.md        # Auto-built user profile (updated every 20 /think calls)
 └── skills/           # Markdown skill files with trigger patterns
     ├── translate.md
     ├── code.md
@@ -113,6 +114,18 @@ If not, translate to Spanish. Return ONLY the translation.
 
 No tool calling, no function schemas, no XML. Just prompt injection. Create new skills from Telegram with `/newskill`.
 
+### Smart Memory System
+
+Inspired by [supermemory](https://github.com/supermemoryai/openclaw-supermemory), Berryclaw has an intelligent memory system that goes beyond simple note-taking:
+
+| Feature | How it works |
+|---------|-------------|
+| **Auto-capture** | After every `/think` response, a cheap fast model (Gemini Flash) extracts key facts and saves them to MEMORY.md automatically. No manual `/remember` needed. |
+| **Smart recall** | Before each `/think`, relevant memories are filtered and injected into the prompt — not the entire memory file. Keeps context focused. |
+| **User profile** | Every 20 `/think` calls, a profile is auto-built from conversation history and memories. Saved to `workspace/PROFILE.md`. View with `/profile`. |
+
+The memory model (`memory_model` in config) handles extraction and filtering. Defaults to `google/gemini-2.0-flash-001` — fast and cheap.
+
 ## Features
 
 | Feature | Command | Brain |
@@ -128,6 +141,7 @@ No tool calling, no function schemas, no XML. Just prompt injection. Create new 
 | Save memory | `/remember <note>` | — |
 | View memory | `/memory` | — |
 | Clear memory | `/forget` | — |
+| View user profile | `/profile` | — |
 | Edit identity | `/identity [new content]` | — |
 | Edit personality | `/soul [new content]` | — |
 | Edit user info | `/user [new content]` | — |
@@ -177,12 +191,18 @@ The install script installs Python deps and creates a systemd user service that 
   "allowed_users": [],
   "admin_users": [YOUR_TELEGRAM_USER_ID],
   "openrouter_api_key": "YOUR_OPENROUTER_KEY",
-  "openrouter_model": "x-ai/grok-4.1-fast"
+  "openrouter_model": "x-ai/grok-4.1-fast",
+  "memory_model": "google/gemini-2.0-flash-001",
+  "auto_capture": true,
+  "profile_frequency": 20
 }
 ```
 
 - `allowed_users`: empty = everyone allowed. Add Telegram user IDs to restrict.
 - `admin_users`: can use `/status`, `/forget`, `/newskill`, `/deleteskill`.
+- `memory_model`: which model handles memory extraction/recall (cheap and fast recommended).
+- `auto_capture`: set to `false` to disable automatic fact extraction after `/think`.
+- `profile_frequency`: rebuild user profile every N `/think` calls.
 
 ## Migrating from OpenClaw / ZeroClaw
 

@@ -3,7 +3,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-echo "🍓 Installing Berryclaw..."
+echo "🫐 Installing Berryclaw..."
 
 # Install Python deps
 pip3 install --break-system-packages -q python-telegram-bot httpx 2>/dev/null || \
