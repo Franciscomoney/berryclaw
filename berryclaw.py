@@ -397,7 +397,14 @@ def _db() -> sqlite3.Connection:
             model TEXT NOT NULL
         )"""
     )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS user_voice (
+            chat_id INTEGER PRIMARY KEY,
+            voice TEXT NOT NULL
+        )"""
+    )
     conn.commit()
+
     return conn
 
 
@@ -451,6 +458,38 @@ def set_user_cloud_model(chat_id: int, model: str):
     DB.execute(
         "INSERT OR REPLACE INTO user_cloud_model (chat_id, model) VALUES (?, ?)",
         (chat_id, model),
+    )
+    DB.commit()
+
+
+DEFAULT_TTS_VOICE = "aura-asteria-en"
+TTS_VOICES = {
+    "asteria": ("aura-asteria-en", "Female, warm"),
+    "luna": ("aura-luna-en", "Female, soft"),
+    "stella": ("aura-stella-en", "Female, clear"),
+    "athena": ("aura-athena-en", "Female, professional"),
+    "hera": ("aura-hera-en", "Female, authoritative"),
+    "orion": ("aura-orion-en", "Male, deep"),
+    "arcas": ("aura-arcas-en", "Male, conversational"),
+    "perseus": ("aura-perseus-en", "Male, warm"),
+    "angus": ("aura-angus-en", "Male, Irish"),
+    "orpheus": ("aura-orpheus-en", "Male, rich"),
+    "helios": ("aura-helios-en", "Male, British"),
+    "zeus": ("aura-zeus-en", "Male, authoritative"),
+}
+
+
+def get_user_voice(chat_id: int) -> str:
+    row = DB.execute(
+        "SELECT voice FROM user_voice WHERE chat_id = ?", (chat_id,)
+    ).fetchone()
+    return row[0] if row else DEFAULT_TTS_VOICE
+
+
+def set_user_voice(chat_id: int, voice: str):
+    DB.execute(
+        "INSERT OR REPLACE INTO user_voice (chat_id, voice) VALUES (?, ?)",
+        (chat_id, voice),
     )
     DB.commit()
 
@@ -1780,6 +1819,45 @@ async def callback_soul(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def callback_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handle voice picker button press."""
+    query = update.callback_query
+    if not is_allowed(query.from_user.id):
+        await query.answer("Not authorized.")
+        return
+
+    name = (query.data or "").split(":", 1)[1]
+    if name not in TTS_VOICES:
+        await query.answer("Unknown voice.")
+        return
+
+    voice_id, desc = TTS_VOICES[name]
+    chat_id = query.message.chat_id
+    set_user_voice(chat_id, voice_id)
+    await query.answer(f"Voice: {name}")
+
+    # Rebuild buttons with new selection
+    buttons = []
+    row = []
+    for n, (vid, d) in TTS_VOICES.items():
+        label = f"{'✅ ' if vid == voice_id else ''}{n}"
+        row.append(InlineKeyboardButton(label, callback_data=f"voice:{n}"))
+        if len(row) == 3:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+
+    await query.edit_message_text(
+        f"🎙 *Voice Settings*\n\n"
+        f"Current: *{name}* ({desc})\n\n"
+        f"Send a voice note and I'll respond with voice!\n"
+        f"Tap below to change voice:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
 async def callback_api(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Handle inline button press for API key management."""
     global INTEGRATIONS
@@ -2575,9 +2653,29 @@ async def cmd_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             voice = msg.reply_to_message.audio
 
     if not voice:
+        # No voice note — show current voice + picker buttons
+        chat_id = update.effective_chat.id
+        current = get_user_voice(chat_id)
+        current_name = next((k for k, (v, _) in TTS_VOICES.items() if v == current), "asteria")
+
+        buttons = []
+        row = []
+        for name, (voice_id, desc) in TTS_VOICES.items():
+            label = f"{'✅ ' if voice_id == current else ''}{name}"
+            row.append(InlineKeyboardButton(label, callback_data=f"voice:{name}"))
+            if len(row) == 3:
+                buttons.append(row)
+                row = []
+        if row:
+            buttons.append(row)
+
         await update.message.reply_text(
-            "Reply to a voice message with `/voice` to transcribe it.",
+            f"🎙 *Voice Settings*\n\n"
+            f"Current: *{current_name}* ({dict(TTS_VOICES.values()).get(current, '')})\n\n"
+            f"Send a voice note and I'll respond with voice!\n"
+            f"Tap below to change voice:",
             parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(buttons),
         )
         return
 
@@ -3245,7 +3343,8 @@ async def handle_voice_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         # Truncate for TTS (Deepgram has limits)
         tts_text = response[:1000] if len(response) > 1000 else response
-        audio_response = await synthesize(tts_text, deepgram_key)
+        user_voice = get_user_voice(chat_id)
+        audio_response = await synthesize(tts_text, deepgram_key, voice=user_voice)
 
         # Step 4: Send voice note back
         await update.message.reply_voice(
@@ -3337,6 +3436,7 @@ def main():
     app.add_handler(CallbackQueryHandler(callback_soul, pattern=r"^soul:"))
     app.add_handler(CallbackQueryHandler(callback_build, pattern=r"^build:"))
     app.add_handler(CallbackQueryHandler(callback_build_menu, pattern=r"^bmenu:"))
+    app.add_handler(CallbackQueryHandler(callback_voice, pattern=r"^voice:"))
     app.add_handler(CallbackQueryHandler(callback_api, pattern=r"^api:"))
     app.add_handler(CallbackQueryHandler(
         lambda u, c: log.warning("Unhandled callback: %s", u.callback_query.data)
