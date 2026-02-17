@@ -1281,6 +1281,48 @@ async def callback_cloudmodel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(f"🧠 Cloud model set to `{chosen}`", parse_mode="Markdown")
 
 
+async def callback_api(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handle inline button press for API key management."""
+    global INTEGRATIONS
+    query = update.callback_query
+
+    if not is_admin(query.from_user.id):
+        await query.answer("Admin only.")
+        return
+
+    data = query.data or ""
+
+    if data.startswith("api:set:"):
+        key_name = data.split(":", 2)[2]
+        await query.answer()
+        await query.edit_message_text(
+            f"To set `{key_name}`, send:\n\n"
+            f"`/api set {key_name} YOUR_KEY_HERE`\n\n"
+            f"Your message will be auto-deleted for security.",
+            parse_mode="Markdown",
+        )
+        return
+
+    if data.startswith("api:rm:"):
+        key_name = data.split(":", 2)[2]
+        if key_name in SECRETS:
+            SECRETS[key_name] = ""
+            with open(SECRETS_PATH, "w") as f:
+                json.dump(SECRETS, f, indent=2)
+                f.write("\n")
+            INTEGRATIONS = load_integrations()
+
+        await query.answer(f"Removed {key_name}")
+        await query.edit_message_text(
+            f"Removed `{key_name}`.\n"
+            f"Active integrations: {', '.join('/' + c for c in INTEGRATIONS) if INTEGRATIONS else 'none'}",
+            parse_mode="Markdown",
+        )
+        return
+
+    await query.answer()
+
+
 async def cmd_api(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """/api — manage API keys for integrations (admin only)."""
     global INTEGRATIONS
@@ -1338,13 +1380,27 @@ async def cmd_api(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         else:
             lines.append("  _(none — add API keys to activate)_")
 
-        lines.append(
-            "\n*Commands:*\n"
-            "  `/api set <key> <value>` — set a key\n"
-            "  `/api remove <key>` — remove a key"
-        )
+        lines.append("\n_Tap a button below to set a key:_")
 
-        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        # Build buttons — one per unset key (+ remove for set keys)
+        buttons = []
+        for key in all_keys:
+            val = get_secret(key)
+            if key in core_keys:
+                continue  # Don't show set/remove for core keys
+            if not val:
+                buttons.append([InlineKeyboardButton(
+                    f"Set {key}", callback_data=f"api:set:{key}"
+                )])
+            else:
+                buttons.append([InlineKeyboardButton(
+                    f"Remove {key}", callback_data=f"api:rm:{key}"
+                )])
+
+        keyboard = InlineKeyboardMarkup(buttons) if buttons else None
+        await update.message.reply_text(
+            "\n".join(lines), parse_mode="Markdown", reply_markup=keyboard
+        )
         return
 
     action = parts[1].lower()
@@ -2073,6 +2129,7 @@ def main():
 
     app.add_handler(CallbackQueryHandler(callback_model, pattern=r"^m:"))
     app.add_handler(CallbackQueryHandler(callback_cloudmodel, pattern=r"^cx:"))
+    app.add_handler(CallbackQueryHandler(callback_api, pattern=r"^api:"))
     app.add_handler(CallbackQueryHandler(
         lambda u, c: log.warning("Unhandled callback: %s", u.callback_query.data)
     ))
