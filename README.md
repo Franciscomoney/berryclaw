@@ -1,228 +1,175 @@
-# 🫐 Berryclaw
+# Berryclaw
 
-A lightweight Telegram bot optimized for **Raspberry Pi 5 + Ollama**. Two brains: a fast local model for casual chat, and a powerful cloud model (via OpenRouter) for complex tasks.
+A Telegram bot that turns your Raspberry Pi 5 into a personal AI assistant. Three modes, one chat:
 
-Built after OpenClaw, NanoClaw, and ZeroClaw all failed on the Pi. This is what works.
+- **Chat** — type anything, get instant replies from a local model running on your Pi
+- **Think** — type `/think` for complex questions routed to powerful cloud models (Grok, Claude, Gemini)
+- **Build** — type `/build` to launch real [Claude Code](https://claude.ai/claude-code) on your Pi, controlled entirely from Telegram
 
-## Why Berryclaw Exists
+Single Python file. ~30MB RAM. Runs 24/7 on a Raspberry Pi 5.
 
-### The Problem
-
-We wanted a Telegram AI bot running locally on a Raspberry Pi 5 (8GB RAM, ARM64, no GPU). We tried three existing frameworks first. All of them failed.
-
-### What We Tried (and Why It Failed)
-
-#### OpenClaw ❌
-**What it is:** A Node.js-based AI gateway that routes Telegram messages to LLMs. Supports multiple agents, skills, tools, workspaces, heartbeats, memory.
-
-**Why it failed on Pi:**
-- System prompts are **massive** — IDENTITY.md + SOUL.md + USER.md + AGENTS.md + TOOLS.md + skill descriptions + memory + conversation history. Easily 3,000-5,000 tokens before the user even says "hi".
-- Small models (0.6B-1.5B) can't handle complex system prompts. They either:
-  - Parrot back the XML/tool-call syntax from the prompt instead of answering
-  - Waste their entire context window on internal "thinking" tags
-  - Hallucinate tool calls that don't exist
-- The Node.js gateway + dependencies eat ~200MB RAM just sitting idle. On a Pi with 8GB shared with the desktop and Ollama, that's a lot.
-- OpenClaw is designed for cloud models (GPT-4, Claude, Grok) with huge context windows. It's overkill for a 1.5B model with 2K context.
-
-#### ZeroClaw ❌
-**What it is:** A lighter alternative to OpenClaw, also Node.js-based.
-
-**Why it failed on Pi:**
-- Same fundamental problem: system prompt too complex for small models
-- The LLM kept timing out — `FailoverError: LLM request timed out` in the logs
-- Still tried to use tool-calling patterns that small models can't handle
-- The daemon ran but produced garbage responses or no responses at all
-
-#### NanoClaw ❌
-**What it is:** An attempt at a minimal version.
-
-**Why it failed on Pi:**
-- Still inherited the same prompt architecture assumptions
-- Small models need a fundamentally different approach, not just fewer features
-
-### The Lessons
-
-After three failures, the pattern was clear:
-
-| Lesson | Detail |
-|--------|--------|
-| **Small models need tiny prompts** | 50 tokens max for the system prompt. Not 5,000. Every token counts when your model only has 2K context. |
-| **No tool calling with small models** | They can't reliably output structured function calls. They'll parrot XML or hallucinate tools. |
-| **No thinking/reasoning tags** | Models under 3B can't do chain-of-thought without wasting their entire context. |
-| **Two brains > one brain** | Use the tiny local model for fast chat, escalate to a cloud model for hard stuff. Best of both worlds. |
-| **Keep model warm** | Ollama unloads models after 5 minutes of inactivity. Cold start on Pi = 80 seconds. A ping every 4 minutes prevents this. |
-| **Python > Node.js for this** | Simpler, less RAM (~30MB vs ~200MB), easier to deploy on Pi, async with httpx works great. |
-| **Markdown workspace files** | The personality/identity/skills system from OpenClaw is brilliant — but feed the full files to the CLOUD model, and only extract a one-liner for the local model. |
-| **Streaming is essential** | Small models on CPU are slow (5-15 tok/s). Without streaming, the user stares at "..." for 30 seconds. With streaming, they see it typing in real-time. |
-
-## Architecture
+## How it works
 
 ```
-Telegram ←→ Berryclaw (Python) ←→ Ollama (local, fast, casual)
-                                 ↘ OpenRouter (cloud, powerful, /think + /skills)
+You (Telegram)
+  |
+  |-- regular message --> Ollama (runs locally on your Pi, fast, free)
+  |
+  |-- /think question --> OpenRouter (cloud models: Grok, Gemini, etc.)
+  |
+  |-- /build ----------> Claude Code (real AI coding agent in a tmux session)
 ```
 
-**Single Python file** + markdown workspace files. No framework bloat.
+**Chat mode** uses a tiny local model (1-1.5B parameters) running on Ollama. It responds in 2-5 seconds, streams in real-time, knows your name, has personality, and remembers things. No internet needed.
 
-### Local Brain (Ollama)
-- Handles regular messages
-- System prompt: ~500 tokens — compressed personality, user context, rules
-- Streaming responses with batched Telegram message edits
-- Per-user model selection
-- ~5-15 tokens/second on Pi 5
+**Think mode** sends your question to a cloud model via OpenRouter. It has full context — your identity, personality, memories, user profile — and can generate images, search the web, analyze photos, read documents, and more.
 
-### Cloud Brain (OpenRouter)
-- Handles `/think` queries, skills, and power skills
-- Full system prompt: IDENTITY + SOUL + USER + AGENTS + PROFILE + MEMORY
-- Power skills: `/imagine`, `/see`, `/search`, `/read`, `/voice`
-- Supports any model: Grok, Claude, Gemini, DeepSeek, etc.
-- Per-user model selection
+**Build mode** starts a real Claude Code session on your Pi using [Ollama cloud models](https://ollama.com/blog/cloud-models). You pick a model, Claude Code launches in the background, and every message you type in Telegram gets sent straight to it. Claude Code can read your files, write code, run commands — all from your phone. Type `/exit` when done.
 
-### Why ~500 Tokens for Local? (OpenClaw Comparison)
+## Quick Start
 
-OpenClaw injects **5,000-15,000 tokens** per call because it targets cloud models with 100K+ context windows. That's the right approach for GPT-4 or Claude — they can digest thousands of tokens of instructions without losing focus.
+```bash
+# Clone
+git clone https://github.com/Franciscomoney/berryclaw.git
+cd berryclaw
 
-Our 1-1.5B local models have 8K-32K context windows, but their real bottleneck is **attention quality** — how much instruction they can reliably follow. After testing, ~500 tokens is the sweet spot.
+# Set up config + secrets
+cp config.json.example config.json
+cp secrets.json.example secrets.json
+# Edit secrets.json — add your Telegram bot token + OpenRouter key
+# Edit config.json — set your admin user ID
 
-| | OpenClaw | Berryclaw Local | Berryclaw Cloud |
-|--|---------|----------------|----------------|
-| Target model | GPT-4, Claude (100K+ ctx) | 1-1.5B Ollama (8-32K ctx) | Grok, Gemini, etc. |
-| System prompt | 5,000-15,000 tokens | **~500 tokens** | ~2,000-5,000 tokens |
-| What's included | IDENTITY + SOUL + USER + AGENTS + TOOLS + MEMORY + skill schemas | Compressed personality, user context, rules, capabilities | Full workspace files + profile + memories |
-| Per-file cap | 20,000 chars | N/A (hand-crafted) | Full file |
-| Total cap | 150,000 chars | ~2,000 chars | No hard cap |
-| Conversation history | Full session | Last 10 messages (~500-2,000 tokens) | Last 10 messages |
-| Memory | Full MEMORY.md dump | Smart recall (keyword-triggered, ~100 tokens) | Smart recall (filtered by relevance) |
-| Tool schemas | 500-3,000 tokens | None (no tool calling) | None |
-
-**Token budget per local call:**
-
-| Layer | Tokens |
-|-------|--------|
-| System prompt (personality + rules) | ~500 |
-| Conversation history (10 messages) | ~500-2,000 |
-| Smart recall memories (when triggered) | 0-100 |
-| User's message | varies |
-| **Total** | **~1,000-3,000** |
-
-This leaves 80-90% of the model's context window free for generation. The 500-token prompt gives Berryclaw real personality — it knows who it is, who you are, and how to behave — without drowning a small model in instructions it can't follow.
-
-### Workspace (Personality & Memory)
-Inspired by OpenClaw's workspace pattern, but adapted for the two-brain architecture:
-
-```
-workspace/
-├── IDENTITY.md       # Name, vibe, emoji (loaded for both brains)
-├── SOUL.md           # Personality, rules, communication style (cloud only)
-├── USER.md           # Who the bot serves (cloud only)
-├── AGENTS.md         # Session behavior protocol (cloud only)
-├── HEARTBEAT.md      # Periodic background tasks (cloud only)
-├── MEMORY.md         # Long-term memory — bot writes, persists across restarts
-├── PROFILE.md        # Auto-built user profile (updated every 20 /think calls)
-└── skills/           # Markdown skill files with trigger patterns
-    ├── translate.md
-    ├── code.md
-    ├── summarize.md
-    └── eli5.md
+# Install & run
+chmod +x install.sh
+./install.sh
 ```
 
-**Key insight:** The local model gets a tiny extract from IDENTITY.md. The cloud model gets everything. This way small models don't choke on prompt complexity, but the cloud model still has full personality and context.
+The install script installs Python deps and creates a systemd service that auto-starts on boot.
 
-### Skills
-Skills are markdown files that inject a specialized prompt into the cloud model:
+Or just run it directly: `python3 berryclaw.py`
 
-```markdown
----
-name: translate
-trigger: /translate
-description: Translate text to any language
----
+## What you need
 
-Translate the user's text. If they specify a target language, use that.
-If not, translate to Spanish. Return ONLY the translation.
-```
+- **Raspberry Pi 5** (8GB recommended) or any Linux machine
+- **[Ollama](https://ollama.com)** installed with at least one model
+- **Python 3.11+**
+- **Telegram bot token** — get one from [@BotFather](https://t.me/BotFather)
+- **[OpenRouter](https://openrouter.ai) API key** — for `/think`, skills, and power features
+- **[Ollama cloud account](https://ollama.com)** (optional) — for `/build` mode with Claude Code
 
-No tool calling, no function schemas, no XML. Just prompt injection. Create new skills from Telegram with `/newskill`.
+## All commands
 
-### Smart Memory System
+### Everyday
 
-Inspired by [supermemory](https://github.com/supermemoryai/openclaw-supermemory), Berryclaw has an intelligent memory system that goes beyond simple note-taking:
-
-| Feature | How it works |
+| Command | What it does |
 |---------|-------------|
-| **Auto-capture** | After every `/think` response, a cheap fast model (Gemini Flash) extracts key facts and saves them to MEMORY.md automatically. No manual `/remember` needed. |
-| **Smart recall** | Before each `/think`, relevant memories are filtered and injected into the prompt — not the entire memory file. Keeps context focused. |
-| **User profile** | Every 20 `/think` calls, a profile is auto-built from conversation history and memories. Saved to `workspace/PROFILE.md`. View with `/profile`. |
+| Just type | Chat with local AI (instant, free, private) |
+| `/think <question>` | Ask a powerful cloud model |
+| `/build` | Start Claude Code session (pick a cloud model) |
+| `/exit` | Exit Claude Code, back to normal chat |
+| `/imagine <prompt>` | Generate an image |
+| `/see` | Analyze a photo (reply to an image) |
+| `/search <query>` | Search the web |
+| `/read` | Read and summarize a document (reply to a file) |
+| Send a voice note | Voice chat — transcribes, responds, speaks back |
 
-The memory model (`memory_model` in config) handles extraction and filtering. Defaults to `liquid/lfm-2.5-1.2b-instruct:free` — free tier on OpenRouter.
+### Skills & memory
 
-## Features
+| Command | What it does |
+|---------|-------------|
+| `/translate <text>` | Translate to any language |
+| `/skills` | List all available skills |
+| `/newskill name \| desc \| prompt` | Create a new skill |
+| `/deleteskill <name>` | Delete a skill |
+| `/remember <note>` | Save something to memory |
+| `/memory` | View all memories |
+| `/forget` | Clear all memories |
+| `/profile` | View your auto-built user profile |
 
-| Feature | Command | Brain |
-|---------|---------|-------|
-| Chat | Just type | Local (Ollama) |
-| Complex questions | `/think <query>` | Cloud (OpenRouter) |
-| Switch local model | `/model` | — |
-| Switch cloud model | `/modelx` | — |
-| Skills (translate, code, etc.) | `/translate <text>` | Cloud |
-| Create skill | `/newskill name \| desc \| prompt` | — |
-| Delete skill | `/deleteskill <name>` | — |
-| List skills | `/skills` | — |
-| Save memory | `/remember <note>` | — |
-| View memory | `/memory` | — |
-| Clear memory | `/forget` | — |
-| View user profile | `/profile` | — |
-| Generate images | `/imagine <prompt>` | Cloud (Gemini) |
-| Analyze photos | `/see [question]` | Cloud (Gemini) |
-| Web search | `/search <query>` | Cloud + Exa |
-| Read documents | `/read [question]` | Cloud (Gemini) |
-| Transcribe voice | `/voice [question]` | Cloud (Gemini) |
-| Voice chat | Send a voice note | Cloud + Deepgram |
-| Scrape websites | `/scrape <url>` | Firecrawl |
-| Run scrapers | `/apify <actor>` | Apify |
-| Google Sheets | `/sheets read\|write\|append` | Google API |
-| Google Docs | `/docs read\|append\|ask` | Google API |
-| Manage API keys | `/api` | — |
-| Edit identity | `/identity [new content]` | — |
-| Edit personality | `/soul` (presets) or `/soul <text>` | — |
-| Edit user info | `/user [new content]` | — |
-| Edit agent rules | `/agents [new content]` | — |
-| Pi stats | `/status` | — |
-| Clear conversation | `/clear` | — |
-| Model warmup | Automatic (every 4 min) | Local |
-| Heartbeat tasks | Automatic (every 30 min) | Cloud |
+### Settings
 
-## User-Friendly Setup
+| Command | What it does |
+|---------|-------------|
+| `/model` | Switch local model |
+| `/modelx` | Switch cloud model |
+| `/soul` | Change personality (presets or custom) |
+| `/identity` | Edit bot identity |
+| `/user` | Edit user context |
+| `/api` | Manage API keys from Telegram |
+| `/status` | Pi system stats |
+| `/clear` | Reset conversation |
+| `/start` | Guided setup with health checks |
 
-Berryclaw is designed for people who don't know a lot about tech.
+## Build Mode (Claude Code)
 
-### Guided Start
-Run `/start` and the bot automatically checks everything:
-- Is Ollama running?
-- Are any models installed?
-- Is the OpenRouter key set?
-- Is voice chat (Deepgram) configured?
+The killer feature. Type `/build` and you get a real Claude Code agent running on your Pi, controlled from Telegram.
 
-If something's missing, it tells you exactly what to do — with buttons to fix it.
+**How it works under the hood:**
 
-### Auto Model Pull
-No models installed? The bot shows a **"Pull recommended model"** button. Tap it and it downloads a 1.5B model directly — no terminal needed.
+1. You tap `/build` — the bot shows cloud model buttons
+2. You pick a model (e.g. `minimax-m2.5:cloud`) — Claude Code starts in a tmux session
+3. You type a message — it's injected into Claude Code via `tmux send-keys`
+4. Claude Code does its thing (reads files, writes code, runs commands)
+5. When it finishes, a Stop hook reads the response from the transcript and sends it back to your Telegram
+6. You type `/exit` — tmux session killed, back to normal chat
 
-### Personality Presets
-Type `/soul` and pick a personality with one tap:
+**Setup for Build Mode:**
+
+1. Sign in to Ollama cloud: `ollama signin` on your Pi
+2. Install Claude Code: `npm install -g @anthropic-ai/claude-code` (or see [install docs](https://docs.anthropic.com/en/docs/claude-code/getting-started))
+3. Add `ollama_api_key` to your `secrets.json`
+4. Copy `send-to-telegram.sh` to `~/.claude/hooks/`
+5. Create `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/YOUR_USER/.claude/hooks/send-to-telegram.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+**Available cloud models:**
+
+| Model | What it's good at |
+|-------|-------------------|
+| `minimax-m2.5:cloud` | Fast coding & productivity |
+| `deepseek-v3.1:cloud` | 671B reasoning powerhouse |
+| `qwen3-coder-next:cloud` | Agentic coding specialist |
+| `glm-5:cloud` | 744B systems engineering |
+| `qwen3.5:cloud` | 397B hybrid vision-language |
+| `kimi-k2.5:cloud` | Multimodal agentic |
+
+## Smart Memory
+
+Berryclaw remembers things automatically:
+
+- **Auto-capture** — after every `/think` response, key facts are extracted and saved. No manual `/remember` needed.
+- **Smart recall** — before each `/think`, relevant memories are pulled in. Not the whole memory file — just what's relevant.
+- **User profile** — every 20 `/think` calls, a profile is auto-built from your conversations. View with `/profile`.
+
+## Personality
+
+Type `/soul` to pick a preset:
 - **Friendly Assistant** — warm and encouraging
 - **Sarcastic Buddy** — witty with dry humor
 - **Professional** — precise and structured
 - **Pirate** — arrr, matey!
 
-Or type `/soul <your custom personality>` for full control.
-
-### API Key Management
-Type `/api` to see which integrations are active and which need keys. Tap a key to add or remove it — all from Telegram, no file editing.
+Or type `/soul <your custom text>` for anything you want.
 
 ## Integrations
 
-Berryclaw auto-discovers integrations from the `integrations/` folder. Drop a Python file in, add the API key via `/api`, and restart.
+Drop a Python file in `integrations/`, add the API key via `/api`, restart. Done.
 
 | Integration | Commands | API Key |
 |-------------|----------|---------|
@@ -231,56 +178,9 @@ Berryclaw auto-discovers integrations from the `integrations/` folder. Drop a Py
 | Apify | `/apify` | `apify_api_key` |
 | Google Workspace | `/sheets`, `/docs` | `google_credentials_file` |
 
-### Adding a New Integration
-
-Create `integrations/myservice.py`:
-
-```python
-NAME = "myservice"
-COMMANDS = {"mycommand": "Description of what it does"}
-REQUIRED_SECRETS = ["myservice_api_key"]
-
-async def handle(command, args, secrets, cloud_chat):
-    api_key = secrets.get("myservice_api_key", "")
-    # Your logic here
-    return "Result text"
-```
-
-Add the key via `/api` → restart the bot. Done.
-
-## Requirements
-
-- Raspberry Pi 5 (8GB recommended) or any Linux machine
-- [Ollama](https://ollama.com) with at least one model pulled
-- Python 3.11+
-- A Telegram bot token (from [@BotFather](https://t.me/BotFather))
-- An [OpenRouter](https://openrouter.ai) API key (for cloud features)
-
-## Quick Start
-
-```bash
-# 1. Clone
-git clone https://github.com/Franciscomoney/berryclaw.git
-cd berryclaw
-
-# 2. Set up config + secrets
-cp config.json.example config.json
-cp secrets.json.example secrets.json
-# Edit secrets.json — add your Telegram bot token + OpenRouter key
-# Edit config.json — set your admin user ID
-
-# 3. Install & run
-chmod +x install.sh
-./install.sh
-```
-
-The install script installs Python deps and creates a systemd user service that auto-starts on boot.
-
 ## Config
 
-Settings go in `config.json`, API keys go in `secrets.json` (gitignored, never committed).
-
-**config.json** — non-sensitive settings:
+**config.json** — settings:
 ```json
 {
   "ollama_url": "http://localhost:11434",
@@ -298,11 +198,12 @@ Settings go in `config.json`, API keys go in `secrets.json` (gitignored, never c
 }
 ```
 
-**secrets.json** — API keys (create from `secrets.json.example`):
+**secrets.json** — API keys (never committed):
 ```json
 {
   "telegram_bot_token": "YOUR_BOT_TOKEN",
   "openrouter_api_key": "YOUR_OPENROUTER_KEY",
+  "ollama_api_key": "YOUR_OLLAMA_KEY",
   "deepgram_api_key": "",
   "firecrawl_api_key": "",
   "apify_api_key": "",
@@ -310,32 +211,21 @@ Settings go in `config.json`, API keys go in `secrets.json` (gitignored, never c
 }
 ```
 
-- `allowed_users`: empty = everyone allowed. Add Telegram user IDs to restrict.
-- `admin_users`: can use `/status`, `/forget`, `/newskill`, `/deleteskill`.
-- `memory_model`: which model handles memory extraction/recall (cheap and fast recommended).
-- `auto_capture`: set to `false` to disable automatic fact extraction after `/think`.
-- `profile_frequency`: rebuild user profile every N `/think` calls.
-- API keys can also be managed from Telegram with `/api`.
+## Recommended Local Models
 
-## Migrating from OpenClaw / ZeroClaw
+| Model | Size | Speed | Quality |
+|-------|------|-------|---------|
+| `huihui_ai/qwen2.5-abliterate:1.5b` | 1.5B | Fast | Best for Pi |
+| `huihui_ai/gemma3-abliterated:1b` | 1B | Faster | Good |
+| `huihui_ai/qwen3-abliterated:0.6b` | 0.6B | Fastest | Basic |
 
-If this bot previously ran OpenClaw or ZeroClaw, Telegram caches the old command menu. After switching to Berryclaw:
+Sweet spot: **1-1.5B quantized models**. Anything above 3B is slow on Pi CPU.
 
-1. Open Telegram **Settings > Data and Storage > Storage Usage > Clear Cache**
-2. Delete the chat with the bot and start a new conversation
-3. The `/` menu will now show Berryclaw's commands
+## Why this exists
 
-This is a Telegram app cache issue — the bot API side updates instantly, but the app holds onto the old list until the cache is cleared.
+We tried three other frameworks on the Pi (OpenClaw, ZeroClaw, NanoClaw). All failed because their system prompts are too complex for small models — 5,000+ tokens of instructions that 1.5B models can't follow. They parrot XML, hallucinate tools, or time out.
 
-## Recommended Models for Pi 5
-
-| Model | Size | Speed | Quality | Command |
-|-------|------|-------|---------|---------|
-| `huihui_ai/gemma3-abliterated:1b` | 1B | Fast | Good | `ollama pull huihui_ai/gemma3-abliterated:1b` |
-| `huihui_ai/qwen2.5-abliterate:1.5b` | 1.5B | Fast | Better | `ollama pull huihui_ai/qwen2.5-abliterate:1.5b` |
-| `huihui_ai/qwen3-abliterated:0.6b` | 0.6B | Fastest | Basic | `ollama pull huihui_ai/qwen3-abliterated:0.6b` |
-
-Sweet spot: **1-1.5B quantized models**. Anything above 3B gets noticeably slow on CPU.
+Berryclaw was built from scratch with one rule: **small models need tiny prompts**. The local model gets ~500 tokens of system prompt. The cloud model gets everything. Two brains, one bot.
 
 ## License
 
