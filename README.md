@@ -199,12 +199,25 @@ Projects started in Build Mode keep running after you `/exit`. Claude Code start
 
 ## Group Chats
 
-Add Berryclaw to any Telegram group. It only responds when:
+Add Berryclaw to any Telegram group. Two modes:
 
-- **@mentioned** — `@yourbot what's the weather?`
-- **Replied to** — reply to one of the bot's messages
+- **Standard groups** — bot only responds when @mentioned or replied to
+- **Routed groups** — bot responds to ALL messages, with a dedicated persona (agent)
 
-All other group messages are ignored. The @mention is stripped from the text before processing so the bot doesn't echo its own name.
+### Routed Groups (Multi-Agent)
+
+Configure `GROUP_ROUTING` in `berryclaw.py` to assign a Telegram group to a specific agent persona. Messages in routed groups skip the @mention requirement — the bot reads and responds to everything.
+
+Each routed group gets its own:
+- **SOUL.md** — personality, objectives, communication style
+- **AGENTS.md** — rules and constraints
+- **Memory** — per-group conversation history
+
+This powers specialized agents like Zote (lead generation) that live in their own Telegram group and operate autonomously.
+
+### Smart Model Routing
+
+For routed groups, Berryclaw detects **action intent** (e.g., "busca plomeros en Miami") and automatically switches to a more capable model (Claude Sonnet) for command execution, while using a fast model (MiniMax) for regular conversation. No manual model switching needed.
 
 ## Smart Memory
 
@@ -255,8 +268,23 @@ Drop a Python file in `integrations/`, add the API key via `/api`, restart. Done
 |-------------|----------|---------|
 | Deepgram | Voice notes (auto) | `deepgram_api_key` |
 | Firecrawl | `/scrape`, `/crawl` | `firecrawl_api_key` |
+| Lead Scraper | `/leads` (Basic/Advanced) | `apify_api_key` |
 | Apify | `/apify` | `apify_api_key` |
 | Google Workspace | `/sheets`, `/docs` | `google_credentials_file` |
+
+### Lead Generation (`/leads`)
+
+The lead scraper is a button-driven Google Maps scraping pipeline. Two modes:
+
+**Basic Mode** — Type `/leads`, tap **Basic**, enter a search query (e.g., "barbershops in Miami"). Gets ~100 leads written to a new Google Sheets tab.
+
+**Advanced Mode** — Type `/leads`, tap **Advanced**, enter a business type, then a city. The bot auto-fetches every ZIP code for that city and runs batched scrapes (10 ZIPs per batch) for full coverage. Gets 500+ unique leads.
+
+Both modes write to Google Sheets with columns: Name, Phone, Email, Website, Address, City, Rating, Reviews, Category, Maps URL. The pipeline is **fully deterministic** — no LLM touches data between Apify and Sheets.
+
+**Enrichment** — After scraping, run `/leads enrich` to crawl business websites (via Firecrawl) and find missing email addresses.
+
+The lead scraper also supports **natural language triggers** via the action tag system. In routed groups, saying "busca barbershops en Las Vegas" automatically triggers the scraper without typing `/leads`.
 
 ## Admin Dashboard
 

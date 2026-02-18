@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -887,6 +888,25 @@ def _is_cloud_model(name: str) -> bool:
 # OpenRouter — cloud escalation for /think
 # ---------------------------------------------------------------------------
 
+_TOOL_CALL_RE = re.compile(
+    r"<[a-zA-Z_:]+tool_call>.*?</[a-zA-Z_:]+tool_call>",
+    re.DOTALL,
+)
+
+
+def _sanitize_model_output(text: str) -> str:
+    """Strip hallucinated tool call XML and other junk from model responses."""
+    if not text:
+        return text
+    # Remove <minimax:tool_call>...</minimax:tool_call> and similar patterns
+    cleaned = _TOOL_CALL_RE.sub("", text)
+    # Remove <tool_call>...</tool_call> variants
+    cleaned = re.sub(r"</?tool_call>", "", cleaned)
+    # Remove <invoke>...</invoke> blocks
+    cleaned = re.sub(r"<invoke\b.*?</invoke>", "", cleaned, flags=re.DOTALL)
+    return cleaned.strip()
+
+
 async def openrouter_chat(messages: list[dict], model: str | None = None) -> str:
     """Send messages to OpenRouter and return the full response."""
     if not OPENROUTER_KEY:
@@ -909,7 +929,8 @@ async def openrouter_chat(messages: list[dict], model: str | None = None) -> str
             )
             r.raise_for_status()
             data = r.json()
-            return data["choices"][0]["message"]["content"]
+            content = data["choices"][0]["message"]["content"]
+            return _sanitize_model_output(content)
     except Exception as e:
         log.error("OpenRouter error: %s", e)
         return f"Cloud model error: {e}"
@@ -1917,6 +1938,33 @@ async def callback_google(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         log.error("Google callback error: %s", e)
         await query.edit_message_text(f"Error: {e}")
+
+
+async def callback_leads(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handle Lead Scraper inline button callbacks (leads:xxx)."""
+    query = update.callback_query
+    await query.answer()
+
+    integration = INTEGRATIONS.get("leads")
+    if not integration:
+        await query.edit_message_text("Leads integration not loaded.")
+        return
+
+    mod = integration.get("module")
+    if not mod or not hasattr(mod, "callback"):
+        await query.edit_message_text("Leads callback not available.")
+        return
+
+    secrets = {k: get_secret(k) for k in SECRETS} if SECRETS else CFG
+
+    try:
+        await mod.callback(query, secrets)
+    except Exception as e:
+        log.error("Leads callback error: %s", e)
+        try:
+            await query.edit_message_text(f"Error: {e}")
+        except Exception:
+            pass
 
 
 async def cmd_model(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -3654,17 +3702,22 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
         return
 
-    global _last_used_model
+    global _last_used_model, INTEGRATIONS
     chat_id = update.effective_chat.id
     user_text = update.message.text
 
-    # Group chat: only respond if @mentioned or replied to
+    # Group chat: respond to all messages in routed groups (Zote, Oracle, etc.)
+    # For non-routed groups: only respond if @mentioned or replied to
     if _is_group_chat(update):
-        if not _bot_mentioned(update):
-            return
-        user_text = _strip_mention(user_text)
-        if not user_text:
-            return
+        is_routed_group = str(chat_id) in GROUP_ROUTING
+        if not is_routed_group:
+            if not _bot_mentioned(update):
+                return
+        # Strip @mention from text if present
+        if _bot_mentioned(update):
+            user_text = _strip_mention(user_text)
+            if not user_text:
+                return
 
     # Check if we're waiting for an API key paste
     if chat_id in _api_awaiting_key and is_admin(update.effective_user.id):
@@ -3676,7 +3729,6 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             json.dump(SECRETS, f, indent=2)
             f.write("\n")
         # Reload integrations
-        global INTEGRATIONS
         INTEGRATIONS = load_integrations()
         # Delete the message (contains the API key)
         try:
@@ -3728,6 +3780,37 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await placeholder.edit_text(f"Auth failed: {e}")
         return
 
+    # Check if leads integration has an active session awaiting text input
+    leads_int = INTEGRATIONS.get("leads")
+    if leads_int:
+        mod = leads_int.get("module")
+        if mod and hasattr(mod, "has_active_session") and mod.has_active_session(chat_id):
+            placeholder = await update.message.reply_text("Processing...")
+            try:
+                secrets = {k: get_secret(k) for k in SECRETS} if SECRETS else CFG
+                result = await mod.handle_text(chat_id, user_text, secrets)
+                if result:
+                    if isinstance(result, dict):
+                        text = result.get("text", "(no result)")
+                        markup = result.get("reply_markup")
+                        try:
+                            await placeholder.edit_text(text, parse_mode="Markdown", reply_markup=markup)
+                        except Exception:
+                            await placeholder.edit_text(text, reply_markup=markup)
+                    else:
+                        if len(result) > 4000:
+                            result = result[:4000] + "\n\n... (truncated)"
+                        try:
+                            await placeholder.edit_text(str(result), parse_mode="Markdown")
+                        except Exception:
+                            await placeholder.edit_text(str(result))
+                else:
+                    await placeholder.delete()
+            except Exception as e:
+                log.error("Leads text handler error: %s", e)
+                await placeholder.edit_text(f"Error: {e}")
+            return
+
     # Check if user is in Build Mode → route to actual Claude Code
     build_model = get_build_mode(chat_id)
     if build_model:
@@ -3752,6 +3835,21 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         placeholder = await update.message.reply_text("...")
         user_id = update.effective_user.id
         cloud_model = get_user_cloud_model(chat_id)
+
+        # Smart model routing: use sonnet for action intent, minimax for chat
+        _action_kw = [
+            "busca ", "encuentra ", "scrape", "scrapea",
+            "quiero leads", "necesito leads", "dame leads",
+            "buscar leads", "buscar ", "encontrar ",
+            "find me ", "get me ", "search for ",
+            "hazme un scrape", "genera leads", "consigue leads",
+            "rastre", "investiga ",
+        ]
+        msg_lower = user_text.lower()
+        if any(kw in msg_lower for kw in _action_kw):
+            cloud_model = "anthropic/claude-sonnet-4-6"
+            log.info("Action intent detected — routing to sonnet")
+
         system = build_system_prompt_cloud(user_id, chat_id)
         relevant_memory = ""
         try:
@@ -3770,6 +3868,59 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
         if not response.strip():
             response = "(empty response)"
+
+        # Check for <<RUN:/command "args">> action tags from the model
+        run_match = re.search(r'<<RUN:(/\w+)\s*(.*?)>>', response)
+        if run_match:
+            run_cmd = run_match.group(1).lstrip("/")
+            run_args = run_match.group(2).strip().strip('"')
+            # Strip the tag from the displayed response
+            clean_response = response[:run_match.start()].strip()
+            integration = INTEGRATIONS.get(run_cmd)
+            if integration:
+                if clean_response:
+                    try:
+                        await placeholder.edit_text(clean_response, parse_mode="Markdown")
+                    except Exception:
+                        await placeholder.edit_text(clean_response)
+                else:
+                    await placeholder.edit_text(f"Running /{run_cmd}...")
+
+                secrets = {k: get_secret(k) for k in SECRETS} if SECRETS else CFG
+
+                async def _cloud_chat(msgs, model=None):
+                    return await openrouter_chat(msgs, model=model)
+
+                try:
+                    result = await integration["handle"](
+                        command=run_cmd, args=run_args,
+                        secrets=secrets, cloud_chat=_cloud_chat,
+                    )
+                    if isinstance(result, dict):
+                        text = result.get("text", "")
+                        markup = result.get("reply_markup")
+                        full_text = f"{clean_response}\n\n{text}" if clean_response else text
+                        if len(full_text) > 4000:
+                            full_text = full_text[:4000] + "\n\n... (truncated)"
+                        try:
+                            await placeholder.edit_text(full_text, parse_mode="Markdown", reply_markup=markup)
+                        except Exception:
+                            await placeholder.edit_text(full_text, reply_markup=markup)
+                    else:
+                        result_str = str(result)
+                        full_text = f"{clean_response}\n\n{result_str}" if clean_response else result_str
+                        if len(full_text) > 4000:
+                            full_text = full_text[:4000] + "\n\n... (truncated)"
+                        try:
+                            await placeholder.edit_text(full_text, parse_mode="Markdown")
+                        except Exception:
+                            await placeholder.edit_text(full_text)
+                except Exception as e:
+                    log.error("RUN action /%s failed: %s", run_cmd, e)
+                    await placeholder.edit_text(f"{clean_response}\n\nError: {e}")
+                save_message(chat_id, "assistant", clean_response or f"[Ran /{run_cmd}]")
+                return
+
         if len(response) > 4000:
             response = response[:4000] + "\n\n... (truncated)"
         try:
@@ -4353,6 +4504,7 @@ def main():
     app.add_handler(CallbackQueryHandler(callback_voice, pattern=r"^voice:"))
     app.add_handler(CallbackQueryHandler(callback_api, pattern=r"^api:"))
     app.add_handler(CallbackQueryHandler(callback_google, pattern=r"^g[sd]:"))
+    app.add_handler(CallbackQueryHandler(callback_leads, pattern=r"^leads:"))
     app.add_handler(CallbackQueryHandler(
         lambda u, c: log.warning("Unhandled callback: %s", u.callback_query.data)
     ))
