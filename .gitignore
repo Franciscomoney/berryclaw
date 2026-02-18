@@ -1,8 +1,16 @@
 config.json
 secrets.json
 google-creds.json
+credentials.json
+token.pickle
+*.pickle
 *.db
 __pycache__/
 *.pyc
 workspace/MEMORY.md
 workspace/PROFILE.md
+workspace/*/memory/
+deploy-experiment/secrets.json
+deploy-experiment/config.json
+google-workspace/credentials.json
+google-workspace/token.pickle

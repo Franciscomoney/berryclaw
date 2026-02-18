@@ -61,6 +61,12 @@ ALLOWED_USERS: list[int] = CFG.get("allowed_users", [])
 ADMIN_USERS: list[int] = CFG.get("admin_users", [])
 OPENROUTER_KEY = get_secret("openrouter_api_key")
 OPENROUTER_MODEL = CFG.get("openrouter_model", "x-ai/grok-4.1-fast")
+CLOUD_ONLY = CFG.get("cloud_only", False)  # Skip Ollama, use OpenRouter for all chat
+
+# Group routing — map group IDs to workspace subdirectories
+# Each group gets its own IDENTITY.md, SOUL.md in workspace/groups/<name>/
+GROUP_ROUTING: dict[str, str] = CFG.get("group_routing", {})
+# e.g. {"-1003812395835": "zote", "-1003848357518": "oracle"}
 
 CLOUD_MODELS = [
     "x-ai/grok-4.1-fast",
@@ -79,7 +85,27 @@ log = logging.getLogger("berryclaw")
 # Workspace loader — build system prompts from markdown files
 # ---------------------------------------------------------------------------
 
-def _read_workspace(filename: str) -> str:
+def _resolve_agent(chat_id: int = 0) -> str:
+    """Resolve which agent handles a given chat_id.
+    Returns agent name ('main', 'zote', 'oracle') or 'main' as default."""
+    return GROUP_ROUTING.get(str(chat_id), "main") if chat_id else "main"
+
+
+def _agent_workspace(agent: str) -> Path:
+    """Get the workspace directory for an agent."""
+    p = WORKSPACE_DIR / agent
+    if p.is_dir():
+        return p
+    return WORKSPACE_DIR  # fallback to root workspace
+
+
+def _read_workspace(filename: str, agent: str = "") -> str:
+    """Read a workspace file, optionally from a specific agent's workspace."""
+    if agent:
+        p = _agent_workspace(agent) / filename
+        if p.exists():
+            return p.read_text().strip()
+    # Fallback to root workspace
     p = WORKSPACE_DIR / filename
     return p.read_text().strip() if p.exists() else ""
 
@@ -88,9 +114,12 @@ PROFILE_PATH = WORKSPACE_DIR / "PROFILE.md"  # Legacy global path
 MEMORY_DIR = WORKSPACE_DIR / "memory"
 
 
-def _user_memory_dir(user_id: int) -> Path:
-    """Get or create per-user memory directory."""
-    d = MEMORY_DIR / str(user_id)
+def _user_memory_dir(user_id: int, agent: str = "") -> Path:
+    """Get or create per-user memory directory, scoped to agent workspace."""
+    if agent:
+        d = _agent_workspace(agent) / "memory" / str(user_id)
+    else:
+        d = MEMORY_DIR / str(user_id)
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -219,18 +248,75 @@ def build_system_prompt_local() -> str:
     return "\n\n".join(parts)
 
 
-def build_system_prompt_cloud(user_id: int = 0) -> str:
-    """Full system prompt for cloud models (OpenRouter) — can handle complexity."""
+def build_system_prompt_cloud(user_id: int = 0, chat_id: int = 0) -> str:
+    """Full system prompt for cloud models — fully agent-scoped.
+
+    Each agent loads ONLY its own workspace files. Main agent additionally
+    gets a summary of subagent workspaces for cross-agent awareness.
+    """
+    agent = _resolve_agent(chat_id)
+
     parts = []
     for fname in ("IDENTITY.md", "SOUL.md", "USER.md", "AGENTS.md"):
-        text = _read_workspace(fname)
+        text = _read_workspace(fname, agent)
         if text:
             parts.append(text)
-    # Append user profile if it exists
+
+    # Agent-scoped user profile
     profile = read_profile(user_id)
     if profile:
         parts.append(f"# User Profile\n\n{profile}")
+
+    # Main agent gets cross-agent visibility
+    if agent == "main":
+        subagent_summary = _build_subagent_summary()
+        if subagent_summary:
+            parts.append(subagent_summary)
+
+    parts.append(f"# Context\nYou are **{agent.capitalize()}**. Agent mode: {'subagent' if agent != 'main' else 'commander'}.")
+
     return "\n\n---\n\n".join(parts)
+
+
+def _build_subagent_summary() -> str:
+    """Build a summary of all subagent workspaces for the Main agent."""
+    summary_parts = ["# Subagent Status"]
+
+    for agent_name in GROUP_ROUTING.values():
+        if agent_name == "main":
+            continue
+        ws = _agent_workspace(agent_name)
+        if not ws.is_dir():
+            continue
+
+        # Read identity
+        identity = ""
+        id_path = ws / "IDENTITY.md"
+        if id_path.exists():
+            identity = id_path.read_text().strip()
+
+        # Read recent memory entries
+        mem_dir = ws / "memory"
+        recent_memory = ""
+        if mem_dir.is_dir():
+            # Get all memory files, newest first
+            mem_files = sorted(mem_dir.glob("**/MEMORY.md"), reverse=True)
+            for mf in mem_files[:3]:
+                content = mf.read_text().strip()
+                if content:
+                    recent_memory += content[:500] + "\n"
+
+        section = f"\n## {agent_name.capitalize()}\n"
+        if identity:
+            section += identity + "\n"
+        if recent_memory:
+            section += f"\n**Recent memory:**\n{recent_memory[:800]}\n"
+        else:
+            section += "\n*No memories recorded yet.*\n"
+
+        summary_parts.append(section)
+
+    return "\n".join(summary_parts) if len(summary_parts) > 1 else ""
 
 
 # ---------------------------------------------------------------------------
@@ -361,49 +447,52 @@ PROFILE_FREQUENCY = CFG.get("profile_frequency", 20)  # Update profile every N /
 _think_counter: int = 0
 
 
-def _user_memory_path(user_id: int) -> Path:
-    """Get per-user MEMORY.md path."""
-    return _user_memory_dir(user_id) / "MEMORY.md"
+def _user_memory_path(user_id: int, agent: str = "") -> Path:
+    """Get per-user MEMORY.md path, scoped to agent workspace."""
+    return _user_memory_dir(user_id, agent) / "MEMORY.md"
 
 
-def read_memory(user_id: int = 0) -> str:
-    """Read user memory. Per-user if user_id given, else legacy global."""
+def read_memory(user_id: int = 0, chat_id: int = 0) -> str:
+    """Read user memory, scoped to the agent for this chat."""
+    agent = _resolve_agent(chat_id) if chat_id else ""
     if user_id:
-        p = _user_memory_path(user_id)
+        p = _user_memory_path(user_id, agent)
         if p.exists():
             return p.read_text().strip()
-        # Migrate: check legacy global file
-        if MEMORY_PATH.exists():
-            content = MEMORY_PATH.read_text().strip()
+        # Migrate: check legacy paths
+        legacy = _user_memory_path(user_id, "")
+        if legacy.exists() and legacy != p:
+            content = legacy.read_text().strip()
             if content and "(empty)" not in content:
-                p.write_text(content + "\n")
                 return content
         return ""
     # Legacy fallback
-    return _read_workspace("MEMORY.md")
+    return _read_workspace("MEMORY.md", agent)
 
 
-def append_memory(note: str, user_id: int = 0):
-    """Append a note to memory."""
+def append_memory(note: str, user_id: int = 0, chat_id: int = 0):
+    """Append a note to memory, scoped to the agent for this chat."""
+    agent = _resolve_agent(chat_id) if chat_id else ""
     if user_id:
-        p = _user_memory_path(user_id)
+        p = _user_memory_path(user_id, agent)
         current = p.read_text() if p.exists() else ""
     else:
         current = MEMORY_PATH.read_text() if MEMORY_PATH.exists() else ""
     timestamp = time.strftime("%Y-%m-%d %H:%M")
     current += f"\n- [{timestamp}] {note}"
     if user_id:
-        _user_memory_dir(user_id)  # ensure dir exists
-        _user_memory_path(user_id).write_text(current)
+        _user_memory_dir(user_id, agent)  # ensure dir exists
+        _user_memory_path(user_id, agent).write_text(current)
     else:
         MEMORY_PATH.write_text(current)
 
 
-def clear_memory(user_id: int = 0):
-    """Reset memory to empty."""
+def clear_memory(user_id: int = 0, chat_id: int = 0):
+    """Reset memory to empty, scoped to agent."""
+    agent = _resolve_agent(chat_id) if chat_id else ""
     empty = "# Berryclaw Memory\n\n(empty)\n"
     if user_id:
-        _user_memory_path(user_id).write_text(empty)
+        _user_memory_path(user_id, agent).write_text(empty)
     else:
         MEMORY_PATH.write_text(empty)
     reload_prompts()
@@ -583,6 +672,7 @@ PENDING_FILE = Path.home() / ".claude" / "telegram_pending"
 CHAT_ID_FILE = Path.home() / ".claude" / "telegram_chat_id"
 _build_polling_cancel: asyncio.Event | None = None  # Signal to stop current polling loop
 _api_awaiting_key: dict[int, str] = {}  # {chat_id: key_name} — waiting for user to paste API key
+_gauth_awaiting_code: dict[int, bool] = {}  # {chat_id: True} — waiting for user to paste Google auth code
 
 
 def _tmux_exists() -> bool:
@@ -888,11 +978,11 @@ def _friendly_error(error: str | Exception, context: str = "") -> str:
 # ---------------------------------------------------------------------------
 
 
-async def auto_capture(user_msg: str, assistant_msg: str, user_id: int = 0):
-    """Extract key facts from a conversation turn and save to memory.
+async def auto_capture(user_msg: str, assistant_msg: str, user_id: int = 0, chat_id: int = 0):
+    """Extract key facts from a conversation turn and save to agent-scoped memory.
     Runs in background after /think responses. Uses a cheap fast model."""
     try:
-        existing = read_memory(user_id) if user_id else _read_workspace("MEMORY.md")
+        existing = read_memory(user_id, chat_id)
         messages = [
             {"role": "system", "content": (
                 "You are a memory extraction system. Given a conversation between a user and an AI, "
@@ -919,16 +1009,17 @@ async def auto_capture(user_msg: str, assistant_msg: str, user_id: int = 0):
             for line in result.strip().splitlines():
                 line = line.strip()
                 if line.startswith("- "):
-                    append_memory(line[2:], user_id)
-            log.info("Auto-capture: saved facts for user %s", user_id)
+                    append_memory(line[2:], user_id, chat_id)
+            agent = _resolve_agent(chat_id)
+            log.info("Auto-capture: saved facts for user %s (agent: %s)", user_id, agent)
     except Exception as e:
         log.warning("Auto-capture failed: %s", e)
 
 
-async def smart_recall(query: str, user_id: int = 0) -> str:
-    """Given a user query, return only the relevant memories.
+async def smart_recall(query: str, user_id: int = 0, chat_id: int = 0) -> str:
+    """Given a user query, return only the relevant memories from this agent's scope.
     Uses a cheap fast model to filter. Returns empty string if no relevant memories."""
-    memory = read_memory(user_id) if user_id else _read_workspace("MEMORY.md")
+    memory = read_memory(user_id, chat_id)
     if not memory or "(empty)" in memory:
         return ""
 
@@ -967,7 +1058,7 @@ async def update_profile(chat_id: int, user_id: int = 0):
     Called every PROFILE_FREQUENCY /think calls."""
     try:
         history = get_history(chat_id)
-        memory = read_memory(user_id) if user_id else _read_workspace("MEMORY.md")
+        memory = read_memory(user_id, chat_id)
         current_profile = read_profile(user_id)
 
         recent_msgs = "\n".join(
@@ -1017,8 +1108,8 @@ _bot_username: str = ""  # Set in post_init for @mention detection
 
 async def warmup_loop():
     """Ping Ollama every WARMUP_INTERVAL seconds to prevent cold starts."""
-    if WARMUP_INTERVAL <= 0:
-        log.info("Warmup disabled")
+    if WARMUP_INTERVAL <= 0 or CLOUD_ONLY:
+        log.info("Warmup disabled%s", " (cloud-only mode)" if CLOUD_ONLY else "")
         return
     log.info("Warmup loop started (every %ds)", WARMUP_INTERVAL)
     while True:
@@ -1478,29 +1569,35 @@ async def cmd_remember(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: `/remember <note>`", parse_mode="Markdown")
         return
     note = args[1].strip()
-    append_memory(note, update.effective_user.id)
-    await update.message.reply_text(f"Saved to memory.")
+    cid = update.effective_chat.id
+    append_memory(note, update.effective_user.id, cid)
+    agent = _resolve_agent(cid)
+    await update.message.reply_text(f"Saved to {agent}'s memory.")
 
 
 async def cmd_memory(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Show long-term memory."""
+    """Show long-term memory for this agent."""
     if not is_allowed(update.effective_user.id):
         return
-    content = read_memory(update.effective_user.id)
+    cid = update.effective_chat.id
+    agent = _resolve_agent(cid)
+    content = read_memory(update.effective_user.id, cid)
     if not content or "(empty)" in content:
-        await update.message.reply_text("Memory is empty. Use `/remember <note>` to add.", parse_mode="Markdown")
+        await update.message.reply_text(f"{agent}'s memory is empty. Use `/remember <note>` to add.", parse_mode="Markdown")
         return
     if len(content) > 3900:
         content = content[:3900] + "\n\n... (truncated)"
-    await update.message.reply_text(f"🧠 *Memory*\n\n```\n{content}\n```", parse_mode="Markdown")
+    await update.message.reply_text(f"*{agent.capitalize()}'s Memory*\n\n```\n{content}\n```", parse_mode="Markdown")
 
 
 async def cmd_forget(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Clear all long-term memory."""
+    """Clear all long-term memory for this agent."""
     if not is_allowed(update.effective_user.id):
         return
-    clear_memory(update.effective_user.id)
-    await update.message.reply_text("Memory cleared.")
+    cid = update.effective_chat.id
+    agent = _resolve_agent(cid)
+    clear_memory(update.effective_user.id, cid)
+    await update.message.reply_text(f"{agent.capitalize()}'s memory cleared.")
 
 
 async def cmd_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1724,17 +1821,102 @@ async def _integration_command_handler(update: Update, ctx: ContextTypes.DEFAULT
         if not result:
             result = "(no result)"
 
-        if len(result) > 4000:
-            result = result[:4000] + "\n\n... (truncated)"
-
-        try:
-            await placeholder.edit_text(result, parse_mode="Markdown")
-        except Exception:
-            await placeholder.edit_text(result)
+        # Support dict returns with reply_markup for inline buttons
+        if isinstance(result, dict):
+            text = result.get("text", "(no result)")
+            markup = result.get("reply_markup")
+            if len(text) > 4000:
+                text = text[:4000] + "\n\n... (truncated)"
+            try:
+                await placeholder.edit_text(text, parse_mode="Markdown", reply_markup=markup)
+            except Exception:
+                await placeholder.edit_text(text, reply_markup=markup)
+        else:
+            if len(result) > 4000:
+                result = result[:4000] + "\n\n... (truncated)"
+            try:
+                await placeholder.edit_text(result, parse_mode="Markdown")
+            except Exception:
+                await placeholder.edit_text(result)
 
     except Exception as e:
         log.error("Integration %s error: %s", command, e)
         await placeholder.edit_text(_friendly_error(e, command))
+
+
+async def callback_google(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handle Google Sheets/Docs inline button callbacks (gs:xxx)."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data  # e.g. "gs:list", "gs:read", "gs:auth", "gd:read"
+
+    integration = INTEGRATIONS.get("sheets") or INTEGRATIONS.get("docs") or INTEGRATIONS.get("gauth")
+    if not integration:
+        await query.edit_message_text("Google integration not loaded.")
+        return
+
+    async def cloud_chat(messages, model=None):
+        return await openrouter_chat(messages, model=model)
+
+    secrets = {k: get_secret(k) for k in SECRETS} if SECRETS else CFG
+
+    try:
+        if data == "gs:list":
+            result = await integration["handle"](command="sheets", args="list", secrets=secrets, cloud_chat=cloud_chat)
+        elif data == "gs:read":
+            await query.edit_message_text("Send the sheet ID and range:\n`/sheets read <sheet_id> [A1:Z100]`", parse_mode="Markdown")
+            return
+        elif data == "gs:write":
+            await query.edit_message_text("Send the write command:\n`/sheets write <sheet_id> <range> <value>`", parse_mode="Markdown")
+            return
+        elif data == "gs:append":
+            await query.edit_message_text("Send the append command:\n`/sheets append <sheet_id> <range> val1 | val2 | val3`", parse_mode="Markdown")
+            return
+        elif data == "gs:auth":
+            result = await integration["handle"](command="gauth", args="", secrets=secrets, cloud_chat=cloud_chat)
+            # Set awaiting flag so next message is treated as the auth code
+            cid = query.message.chat_id
+            _gauth_awaiting_code[cid] = True
+            # Move pending flow to correct chat_id (use integration's module instance)
+            try:
+                mod = integration.get("module")
+                if mod and hasattr(mod, "_pending_flow"):
+                    if 0 in mod._pending_flow:
+                        mod._pending_flow[cid] = mod._pending_flow.pop(0)
+            except Exception:
+                pass
+        elif data == "gd:read":
+            await query.edit_message_text("Send the doc ID:\n`/docs read <doc_id>`", parse_mode="Markdown")
+            return
+        elif data == "gd:append":
+            await query.edit_message_text("Send the append command:\n`/docs append <doc_id> <text>`", parse_mode="Markdown")
+            return
+        elif data == "gd:ask":
+            await query.edit_message_text("Send your question:\n`/docs ask <doc_id> <question>`", parse_mode="Markdown")
+            return
+        else:
+            await query.edit_message_text(f"Unknown action: {data}")
+            return
+
+        # Handle result (string or dict)
+        if isinstance(result, dict):
+            text = result.get("text", "(no result)")
+            markup = result.get("reply_markup")
+            try:
+                await query.edit_message_text(text, parse_mode="Markdown", reply_markup=markup)
+            except Exception:
+                await query.edit_message_text(text, reply_markup=markup)
+        else:
+            if len(result) > 4000:
+                result = result[:4000] + "\n\n... (truncated)"
+            try:
+                await query.edit_message_text(result, parse_mode="Markdown")
+            except Exception:
+                await query.edit_message_text(result)
+
+    except Exception as e:
+        log.error("Google callback error: %s", e)
+        await query.edit_message_text(f"Error: {e}")
 
 
 async def cmd_model(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1936,27 +2118,81 @@ async def callback_pull(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_modelx(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Show cloud model picker with inline buttons."""
+    """Show cloud model picker with inline buttons.
+
+    Usage:
+      /modelx           — pick model for current agent
+      /modelx zote      — pick model for Zote (admin, from any chat)
+      /modelx oracle    — pick model for Oracle (admin, from any chat)
+      /modelx status    — show all agents' current models
+    """
     if not is_allowed(update.effective_user.id):
         return
 
-    chat_id = update.effective_chat.id
-    current = get_user_cloud_model(chat_id)
+    args = update.message.text.split(maxsplit=1)
+    arg = args[1].strip().lower() if len(args) > 1 else ""
+
+    # /modelx status — show all agent models
+    if arg == "status":
+        lines = []
+        # Current chat
+        for agent_name, group_id in GROUP_ROUTING.items():
+            model = get_user_cloud_model(int(group_id))
+            lines.append(f"**{_agent_name_from_group(group_id)}**: `{model}`")
+        # Main (DMs use chat_id of the user)
+        main_model = OPENROUTER_MODEL  # default
+        lines.insert(0, f"**Main** (default): `{main_model}`")
+        await update.message.reply_text(
+            "**Agent Models:**\n" + "\n".join(lines),
+            parse_mode="Markdown",
+        )
+        return
+
+    # /modelx <agent> — set model for a specific agent (admin only)
+    target_chat_id = update.effective_chat.id
+    target_label = _resolve_agent(target_chat_id).capitalize()
+
+    if arg and arg in ("zote", "oracle", "main"):
+        if not is_admin(update.effective_user.id):
+            await update.message.reply_text("Only admins can change other agents' models.")
+            return
+        # Find the group chat_id for this agent
+        for gid, aname in GROUP_ROUTING.items():
+            if aname == arg:
+                target_chat_id = int(gid)
+                target_label = arg.capitalize()
+                break
+        else:
+            if arg == "main":
+                target_label = "Main"
+                # Main uses the current DM chat_id
+            else:
+                await update.message.reply_text(f"Agent `{arg}` not found.")
+                return
+
+    current = get_user_cloud_model(target_chat_id)
 
     buttons = []
     for m in CLOUD_MODELS:
         label = f"✅ {m}" if m == current else m
-        buttons.append([InlineKeyboardButton(label, callback_data=f"cx:{m}")])
+        # Encode target chat_id in callback data
+        buttons.append([InlineKeyboardButton(label, callback_data=f"cx:{target_chat_id}:{m}")])
 
     await update.message.reply_text(
-        "🧠 *Pick a cloud model for /think:*",
+        f"*Pick cloud model for {target_label}:*\nCurrent: `{current}`",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(buttons),
     )
 
 
+def _agent_name_from_group(group_id: str) -> str:
+    """Get agent name from group ID."""
+    return GROUP_ROUTING.get(str(group_id), "main").capitalize()
+
+
 async def callback_cloudmodel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Handle inline button press for cloud model selection."""
+    """Handle inline button press for cloud model selection.
+    Callback data format: cx:<target_chat_id>:<model> or legacy cx:<model>"""
     query = update.callback_query
 
     if not is_allowed(query.from_user.id):
@@ -1968,12 +2204,27 @@ async def callback_cloudmodel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         return
 
-    chosen = data.split(":", 1)[1]
-    chat_id = query.message.chat_id
-    set_user_cloud_model(chat_id, chosen)
+    parts = data.split(":", 2)
+    if len(parts) == 3:
+        # New format: cx:<target_chat_id>:<model>
+        try:
+            target_chat_id = int(parts[1])
+        except ValueError:
+            target_chat_id = query.message.chat_id
+        chosen = parts[2]
+    else:
+        # Legacy format: cx:<model>
+        target_chat_id = query.message.chat_id
+        chosen = parts[1]
 
-    await query.answer(f"Cloud model: {chosen}")
-    await query.edit_message_text(f"🧠 Cloud model set to `{chosen}`", parse_mode="Markdown")
+    set_user_cloud_model(target_chat_id, chosen)
+    agent = _resolve_agent(target_chat_id)
+
+    await query.answer(f"{agent.capitalize()}: {chosen}")
+    await query.edit_message_text(
+        f"**{agent.capitalize()}** model set to `{chosen}`",
+        parse_mode="Markdown",
+    )
 
 
 async def callback_soul(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -2562,11 +2813,11 @@ async def cmd_think(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     placeholder = await update.message.reply_text(f"🧠 Thinking with `{cloud_model}`...", parse_mode="Markdown")
 
-    # Smart recall — fetch only relevant memories (per-user)
-    relevant_memory = await smart_recall(query, user_id)
+    # Smart recall — fetch only relevant memories (per-user, per-agent)
+    relevant_memory = await smart_recall(query, user_id, chat_id)
 
-    # Build system prompt with relevant memory injected (per-user profile)
-    system = build_system_prompt_cloud(user_id)
+    # Build system prompt with relevant memory injected (agent-scoped)
+    system = build_system_prompt_cloud(user_id, chat_id)
     if relevant_memory:
         system += f"\n\n---\n\n# Relevant Memories\n\n{relevant_memory}"
 
@@ -2613,9 +2864,9 @@ async def cmd_think(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception:
         await placeholder.edit_text(f"{header}\n\n{response}")
 
-    # Background: auto-capture facts + profile update (per-user)
+    # Background: auto-capture facts + profile update (per-user, per-agent)
     if AUTO_CAPTURE:
-        asyncio.create_task(auto_capture(query, full_response, user_id))
+        asyncio.create_task(auto_capture(query, full_response, user_id, chat_id))
 
     global _think_counter
     _think_counter += 1
@@ -3441,6 +3692,42 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Check if we're waiting for a Google auth code
+    if chat_id in _gauth_awaiting_code:
+        _gauth_awaiting_code.pop(chat_id)
+        code = user_text.strip()
+        if len(code) < 10:
+            await update.message.reply_text("That doesn't look like a valid code. Try `/sheets` again.", parse_mode="Markdown")
+            return
+        # Route through the SAME module instance the integration system uses
+        integration = INTEGRATIONS.get("gauth") or INTEGRATIONS.get("sheets")
+        if not integration:
+            await update.message.reply_text("Google integration not loaded.")
+            return
+        placeholder = await update.message.reply_text("Exchanging code...")
+        try:
+            result = await integration["handle"](
+                command="gauth", args=code,
+                secrets={k: get_secret(k) for k in SECRETS} if SECRETS else CFG,
+                cloud_chat=lambda msgs, model=None: openrouter_chat(msgs, model=model),
+            )
+            if isinstance(result, dict):
+                text = result.get("text", str(result))
+                markup = result.get("reply_markup")
+                try:
+                    await placeholder.edit_text(text, parse_mode="Markdown", reply_markup=markup)
+                except Exception:
+                    await placeholder.edit_text(text, reply_markup=markup)
+            else:
+                try:
+                    await placeholder.edit_text(str(result), parse_mode="Markdown")
+                except Exception:
+                    await placeholder.edit_text(str(result))
+        except Exception as e:
+            log.error("Google auth exchange error: %s", e)
+            await placeholder.edit_text(f"Auth failed: {e}")
+        return
+
     # Check if user is in Build Mode → route to actual Claude Code
     build_model = get_build_mode(chat_id)
     if build_model:
@@ -3460,6 +3747,43 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Save user message
     save_message(chat_id, "user", user_text)
 
+    # Cloud-only mode — route all messages through OpenRouter
+    if CLOUD_ONLY:
+        placeholder = await update.message.reply_text("...")
+        user_id = update.effective_user.id
+        cloud_model = get_user_cloud_model(chat_id)
+        system = build_system_prompt_cloud(user_id, chat_id)
+        relevant_memory = ""
+        try:
+            relevant_memory = await smart_recall(user_text, user_id, chat_id)
+        except Exception:
+            pass
+        if relevant_memory:
+            system += f"\n\n---\n\n# Relevant Memories\n\n{relevant_memory}"
+        history = get_history(chat_id)
+        messages = [{"role": "system", "content": system}]
+        messages.extend(history)
+        try:
+            response = await openrouter_chat(messages, model=cloud_model)
+        except Exception as e:
+            await placeholder.edit_text(f"Cloud error: {e}")
+            return
+        if not response.strip():
+            response = "(empty response)"
+        if len(response) > 4000:
+            response = response[:4000] + "\n\n... (truncated)"
+        try:
+            await placeholder.edit_text(response, parse_mode="Markdown")
+        except Exception:
+            try:
+                await placeholder.edit_text(response)
+            except Exception:
+                pass
+        save_message(chat_id, "assistant", response)
+        if AUTO_CAPTURE:
+            asyncio.create_task(auto_capture(user_text, response, user_id, chat_id))
+        return
+
     # Normal mode — local prompt with optional memory recall
     history = get_history(chat_id)
     system = SYSTEM_PROMPT_LOCAL
@@ -3471,7 +3795,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
     if any(kw in user_text.lower() for kw in _recall_keywords):
         try:
-            relevant_memory = await smart_recall(user_text, update.effective_user.id)
+            relevant_memory = await smart_recall(user_text, update.effective_user.id, chat_id)
             if relevant_memory:
                 if len(relevant_memory) > 300:
                     relevant_memory = relevant_memory[:300] + "..."
@@ -3594,8 +3918,8 @@ async def handle_voice_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # Step 2: Get AI response via cloud model
         user_id = update.effective_user.id
         cloud_model = get_user_cloud_model(chat_id)
-        relevant_memory = await smart_recall(transcript, user_id)
-        system = build_system_prompt_cloud(user_id)
+        relevant_memory = await smart_recall(transcript, user_id, chat_id)
+        system = build_system_prompt_cloud(user_id, chat_id)
         if relevant_memory:
             system += f"\n\n---\n\n# Relevant Memories\n\n{relevant_memory}"
 
@@ -3632,9 +3956,9 @@ async def handle_voice_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 f"You: {transcript}\n\n{response[:2000]}"
             )
 
-        # Background: auto-capture (per-user)
+        # Background: auto-capture (per-user, per-agent)
         if AUTO_CAPTURE:
-            asyncio.create_task(auto_capture(transcript, response, user_id))
+            asyncio.create_task(auto_capture(transcript, response, user_id, chat_id))
 
     except Exception as e:
         log.error("Voice handler error: %s", e)
@@ -3918,6 +4242,8 @@ def _start_dashboard():
 
 async def _check_first_run_models(application):
     """On startup, if Ollama has 0 local models, notify admins with pull buttons."""
+    if CLOUD_ONLY:
+        return  # No Ollama needed in cloud-only mode
     await asyncio.sleep(3)  # Let bot fully start
     try:
         models = await ollama_list_models()
@@ -4026,6 +4352,7 @@ def main():
     app.add_handler(CallbackQueryHandler(callback_build_menu, pattern=r"^bmenu:"))
     app.add_handler(CallbackQueryHandler(callback_voice, pattern=r"^voice:"))
     app.add_handler(CallbackQueryHandler(callback_api, pattern=r"^api:"))
+    app.add_handler(CallbackQueryHandler(callback_google, pattern=r"^g[sd]:"))
     app.add_handler(CallbackQueryHandler(
         lambda u, c: log.warning("Unhandled callback: %s", u.callback_query.data)
     ))
