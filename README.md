@@ -4,7 +4,7 @@
   <img src="berryclaw-mascot.png" alt="Berryclaw mascot" width="200">
 </p>
 
-The first Telegram AI bot actually optimized for Raspberry Pi. Turn your Pi into a hybrid agent to run uncensored local models (don't tell my mom), tap into any OpenRouter LLM, and execute Claude Code in Ollama from one chat.
+The first Telegram AI personal assistant optimized for Raspberry Pi. Turn your Pi into a hybrid agent to run uncensored local models (don't tell my mom), tap into any OpenRouter LLM, and execute Claude Code in Ollama from one chat.
 
 - **Chat** — type anything, get instant replies from a local model running on your Pi
 - **Think** — type `/think` for complex questions routed to powerful cloud models (Grok, Claude, Gemini)
