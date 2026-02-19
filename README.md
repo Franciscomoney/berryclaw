@@ -12,6 +12,22 @@ A Telegram bot that turns your Raspberry Pi 5 into a personal AI assistant. Thre
 
 Single Python file. ~30MB RAM. Runs 24/7 on a Raspberry Pi 5.
 
+## Why this exists
+
+We tried three other frameworks on the Pi (OpenClaw, ZeroClaw, NanoClaw). All failed because their system prompts are too complex for small models — 5,000+ tokens of instructions that 1.5B models can't follow. They parrot XML, hallucinate tools, or time out.
+
+Berryclaw was built from scratch with one rule: **small models need tiny prompts**. The local model gets ~500 tokens of system prompt. The cloud model gets everything. Two brains, one bot.
+
+### Recommended local models
+
+| Model | Speed | Quality | Best for |
+|-------|-------|---------|----------|
+| `huihui_ai/qwen2.5-abliterate:1.5b` | Fast | Best | Daily driver on Pi 5 |
+| `huihui_ai/gemma3-abliterated:1b` | Faster | Good | If you want more free RAM |
+| `huihui_ai/qwen3-abliterated:0.6b` | Fastest | Basic | Minimal setup, quick replies |
+
+Sweet spot: **1-1.5B quantized models**. Anything above 3B gets noticeably slow on CPU (~2-4 tok/s).
+
 ## How it works
 
 ```
@@ -418,22 +434,6 @@ Cloud models (`minimax-m2.5:cloud`, `deepseek-v3.1:cloud`, etc.) run on Ollama's
 **Bottom line:** Even the heaviest setup (3B model + Build Mode) uses under 3 GB. You'll never run out of RAM on a Pi 5 with 8GB.
 
 **Rule of thumb for model size:** Take the parameter count, multiply by 0.6 for Q4 quantization — that's roughly the RAM in GB. A 1.5B model uses ~0.9 GB, a 3B uses ~1.8 GB, a 7B uses ~4.2 GB.
-
-### Recommended local models
-
-| Model | Speed | Quality | Best for |
-|-------|-------|---------|----------|
-| `huihui_ai/qwen2.5-abliterate:1.5b` | Fast | Best | Daily driver on Pi 5 |
-| `huihui_ai/gemma3-abliterated:1b` | Faster | Good | If you want more free RAM |
-| `huihui_ai/qwen3-abliterated:0.6b` | Fastest | Basic | Minimal setup, quick replies |
-
-Sweet spot: **1-1.5B quantized models**. Anything above 3B gets noticeably slow on CPU (~2-4 tok/s).
-
-## Why this exists
-
-We tried three other frameworks on the Pi (OpenClaw, ZeroClaw, NanoClaw). All failed because their system prompts are too complex for small models — 5,000+ tokens of instructions that 1.5B models can't follow. They parrot XML, hallucinate tools, or time out.
-
-Berryclaw was built from scratch with one rule: **small models need tiny prompts**. The local model gets ~500 tokens of system prompt. The cloud model gets everything. Two brains, one bot.
 
 ## License
 
