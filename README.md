@@ -22,9 +22,10 @@ Berryclaw was built from scratch with one rule: **small models need tiny prompts
 
 | Model | Speed | Quality | Best for |
 |-------|-------|---------|----------|
-| `huihui_ai/qwen2.5-abliterate:1.5b` | Fast | Best | Daily driver on Pi 5 |
+| `liquid/lfm-2.5-1.2b-thinking` | Fast | Best | Daily driver on Pi 5 |
+| `huihui_ai/qwen2.5-abliterate:1.5b` | Fast | Best | Great driver on Pi 5 |
 | `huihui_ai/gemma3-abliterated:1b` | Faster | Good | If you want more free RAM |
-| `huihui_ai/qwen3-abliterated:0.6b` | Fastest | Basic | Minimal setup, quick replies |
+| `huihui_ai/qwen3-abliterated:0.6b` | Fastest | Basic | If you want an uncensored model |
 
 Sweet spot: **1-1.5B quantized models**. Anything above 3B gets noticeably slow on CPU (~2-4 tok/s).
 
