@@ -4,7 +4,7 @@
   <img src="berryclaw-mascot.png" alt="Berryclaw mascot" width="200">
 </p>
 
-A Telegram bot that turns your Raspberry Pi 5 into a personal AI assistant. Three modes, one chat:
+A Telegram bot that turns your Raspberry Pi 5 into a personal AI assistant using local models and combined with cloud models. Three modes, one chat:
 
 - **Chat** — type anything, get instant replies from a local model running on your Pi
 - **Think** — type `/think` for complex questions routed to powerful cloud models (Grok, Claude, Gemini)
