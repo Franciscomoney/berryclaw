@@ -155,18 +155,17 @@ async def run_apify_scrape(
     if isinstance(queries, str):
         queries = [queries]
 
-    headers = {"Authorization": f"Bearer {api_key}"}
+    params = {"token": api_key}
     actor_input = {
-        "searchStringsArray": queries,
-        "maxCrawledPlacesPerSearch": max_results,
+        "searchQueries": queries,
+        "maxResultsPerQuery": max_results,
         "language": "en",
-        "includeWebResults": False,
     }
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         r = await client.post(
             f"{APIFY_API}/acts/{GOOGLE_MAPS_ACTOR}/runs",
-            headers=headers,
+            params=params,
             json=actor_input,
         )
         r.raise_for_status()
@@ -183,7 +182,7 @@ async def run_apify_scrape(
             await asyncio.sleep(5)
             r = await client.get(
                 f"{APIFY_API}/actor-runs/{run_id}",
-                headers=headers,
+                params=params,
             )
             r.raise_for_status()
             status = r.json().get("data", {}).get("status")
@@ -193,8 +192,8 @@ async def run_apify_scrape(
                 if not dataset_id:
                     raise RuntimeError("Apify: succeeded but no dataset")
                 r2 = await client.get(
-                    f"{APIFY_API}/datasets/{dataset_id}/items?format=json",
-                    headers=headers,
+                    f"{APIFY_API}/datasets/{dataset_id}/items",
+                    params={**params, "format": "json"},
                 )
                 r2.raise_for_status()
                 items = r2.json()

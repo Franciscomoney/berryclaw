@@ -206,7 +206,16 @@ Add Berryclaw to any Telegram group. Two modes:
 
 ### Routed Groups (Multi-Agent)
 
-Configure `GROUP_ROUTING` in `berryclaw.py` to assign a Telegram group to a specific agent persona. Messages in routed groups skip the @mention requirement — the bot reads and responds to everything.
+Configure `group_routing` in `config.json` to assign a Telegram group to a specific agent persona. Messages in routed groups skip the @mention requirement — the bot reads and responds to everything.
+
+```json
+{
+  "group_routing": {
+    "-1003812395835": "zote",
+    "-1003848357518": "oracle"
+  }
+}
+```
 
 Each routed group gets its own:
 - **SOUL.md** — personality, objectives, communication style
@@ -215,9 +224,23 @@ Each routed group gets its own:
 
 This powers specialized agents like Zote (lead generation) that live in their own Telegram group and operate autonomously.
 
+### Per-Agent Model Selection
+
+Assign different cloud models to different agents via `agent_models` in `config.json`:
+
+```json
+{
+  "agent_models": {
+    "zote": "anthropic/claude-sonnet-4-6"
+  }
+}
+```
+
+Agents without a specific model fall back to the global `openrouter_model`. You can also change models at runtime with `/modelx <agent>` (admin only).
+
 ### Smart Model Routing
 
-For routed groups, Berryclaw detects **action intent** (e.g., "busca plomeros en Miami") and automatically switches to a more capable model (Claude Sonnet) for command execution, while using a fast model (MiniMax) for regular conversation. No manual model switching needed.
+For routed groups, Berryclaw detects **action intent** (e.g., "busca plomeros en Miami") and automatically switches to a more capable model for command execution, while using the default model for regular conversation. No manual model switching needed.
 
 ## Smart Memory
 
@@ -326,7 +349,9 @@ Set `dashboard_port` to `0` to disable.
   "openrouter_model": "x-ai/grok-4.1-fast",
   "memory_model": "liquid/lfm-2.5-1.2b-instruct:free",
   "auto_capture": true,
-  "profile_frequency": 20
+  "profile_frequency": 20,
+  "group_routing": {},
+  "agent_models": {}
 }
 ```
 

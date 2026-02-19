@@ -71,11 +71,15 @@ GROUP_ROUTING: dict[str, str] = CFG.get("group_routing", {})
 
 CLOUD_MODELS = [
     "x-ai/grok-4.1-fast",
+    "anthropic/claude-sonnet-4-6",
     "minimax/minimax-m2.5",
     "z-ai/glm-5",
     "qwen/qwen3.5-plus-02-15",
     "openrouter/aurora-alpha",
 ]
+
+# Per-agent default cloud models (overrides OPENROUTER_MODEL for specific agents)
+AGENT_MODELS: dict[str, str] = CFG.get("agent_models", {})
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO
@@ -600,7 +604,13 @@ def get_user_cloud_model(chat_id: int) -> str:
     row = DB.execute(
         "SELECT model FROM user_cloud_model WHERE chat_id = ?", (chat_id,)
     ).fetchone()
-    return row[0] if row else OPENROUTER_MODEL
+    if row:
+        return row[0]
+    # Check per-agent default before global fallback
+    agent = _resolve_agent(chat_id)
+    if agent in AGENT_MODELS:
+        return AGENT_MODELS[agent]
+    return OPENROUTER_MODEL
 
 
 def set_user_cloud_model(chat_id: int, model: str):

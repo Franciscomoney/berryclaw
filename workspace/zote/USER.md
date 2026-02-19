@@ -9,7 +9,7 @@
 ## Key Resources
 - Default lead sheet: Lista001 (`16m1SQsP76wSc7HXsjAfeEDocEbuUDZj8gCxbk6B_J3w`)
 - Google Sheets and Docs are connected via OAuth2 (token saved locally)
-- Apify runs the Google Maps scraper (actor: compass/crawler-google-places)
+- Apify runs the Google Maps scraper (actor: franciscoandsam~google-maps-scraper)
 - Firecrawl handles website scraping for email enrichment
 
 ## What Users Typically Ask
