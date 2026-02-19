@@ -10,7 +10,7 @@ A Telegram bot that turns your Raspberry Pi 5 into a personal AI assistant using
 - **Think** — type `/think` for complex questions routed to powerful cloud models (Grok, Claude, Gemini)
 - **Build** — type `/build` to launch real [Claude Code](https://claude.ai/claude-code) on your Pi, controlled entirely from Telegram
 
-Single Python file. ~30MB RAM. Runs 24/7 on a Raspberry Pi 5.
+Single Python file. ~30MB RAM. Runs 24/7 on a Raspberry Pi 5. Created by Francisco Cordoba Otalora
 
 ## Why this exists
 
